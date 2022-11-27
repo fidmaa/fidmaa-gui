@@ -7,8 +7,8 @@ def findPoint(
     startX,
     startY,
     direction=1,
-    maxWidth=1480,
-    maxHeight=1640,
+    maxWidth=480,
+    maxHeight=640,
     angle=None,
     linear_coefficient=None,
 ):
@@ -32,7 +32,7 @@ def findPoint(
         linear_coefficient = math.tan(math.radians(angle))
 
     while True:
-        ny = linear_coefficient * nx + startY
+        ny = linear_coefficient * float(nx) + startY
 
         if ny <= 0:
             ny = 0
@@ -47,5 +47,14 @@ def findPoint(
 
         nx += direction
 
-    print("Zwr", nx + startX, ny)
     return QPoint(nx + startX, ny)
+
+
+def findParalellPoint(midpointX, midpointY, angle, distance, direction=1):
+    # Get the midpoint of a paralell line to the left -- this point
+    # can also be used to calculate a perpendicular line
+
+    lpx1 = midpointX + direction * math.sin(math.radians(-angle)) * distance
+    lpy1 = midpointY + direction * math.cos(math.radians(-angle)) * distance
+
+    return (lpx1, lpy1)
