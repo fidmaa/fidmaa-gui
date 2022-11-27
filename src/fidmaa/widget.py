@@ -7,15 +7,14 @@ from typing import Optional
 
 import cv2
 import PySide6
-from PIL import Image, ImageFile
+from PIL import Image, ImageFile, ImageFilter
 from PySide6 import QtGui
 from PySide6.QtCore import QFile, QObject, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtUiTools import QUiLoader
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QWidget
-from src.fidmaa.calculations import findParalellPoint
 
-from calculations import findPoint
+from calculations import findParalellPoint, findPoint
 from QClickableLabel import QClickableLabel
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -185,7 +184,9 @@ class Widget(QWidget):
 
             minimum = (255, 0)
 
-            for n in range(chin_y, len(chart_data)):
+            for n in range(
+                chin_y, len(chart_data) - 10
+            ):  # blur filter can give bad results if we go all the way down (without -10)
                 if chart_data[n] < minimum[0]:
                     minimum = chart_data[n], n
 
@@ -219,8 +220,10 @@ class Widget(QWidget):
             )
 
             try:
-                face_angle = math.degrees(math.asin((chin_y - neck_y) / chin_x))
-            except ZeroDivisionError:
+                face_angle = "%.2f" % math.degrees(
+                    math.asin((chin_y - neck_y) / chin_x)
+                )
+            except (ZeroDivisionError, ValueError):
                 face_angle = "impossible to calc. "
 
             distance = 0
@@ -238,7 +241,7 @@ class Widget(QWidget):
             Highest chin point at: {chin_x:.0f},
             Lowest neck point at: {neck_x:.0f},
             Difference: {chin_x - neck_x:.0f},
-            Angle: {face_angle:.0f} deg,
+            Angle: {face_angle} deg,
             Distance: {distance} pixels.
             """
                 )
@@ -273,11 +276,16 @@ class Widget(QWidget):
         self.smallImage = smallImage
         self.depthmap = Image.open("depthmap.jpg")
 
+        self.depthmap = self.depthmap.filter(ImageFilter.BLUR)
+
         image = cv2.imread(self.filename)
         face_cascade = cv2.CascadeClassifier(
             cv2.data.haarcascades + "haarcascade_frontalface_alt.xml"
         )
-        face = face_cascade.detectMultiScale(image, scaleFactor=1.2, minNeighbors=4)
+        try:
+            face = face_cascade.detectMultiScale(image, scaleFactor=1.2, minNeighbors=4)
+        except BaseException:
+            face = []
 
         #
         # Update midline point to match detected face coords
