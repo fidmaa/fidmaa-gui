@@ -1,8 +1,11 @@
 import math
+import os
 import sys
 from pathlib import Path
+from textwrap import dedent
 from typing import Optional
 
+import cv2
 import PySide6
 from PIL import Image, ImageFile
 from PySide6 import QtGui
@@ -33,6 +36,9 @@ class Widget(QWidget):
         super().__init__(parent)
         self.load_ui()
 
+        self.filename = None
+        self.face = None
+
         self.smallImage = None
         self.depthmap = None
 
@@ -48,6 +54,7 @@ class Widget(QWidget):
 
         canvas = self.ui.imageLabel.pixmap()
         painter = QtGui.QPainter(canvas)
+        painter.setPen(QColor(0, 0, 255, 127))
         canvas.fill(Qt.white)
         if self.smallImage:
             painter.drawImage(0, 0, self.smallImage.toqimage())
@@ -107,6 +114,7 @@ class Widget(QWidget):
         painter.drawLine(rp1, rp2)
 
         # Left image finished...
+
         painter.end()
         self.ui.imageLabel.setPixmap(canvas)
 
@@ -185,7 +193,7 @@ class Widget(QWidget):
 
             maximum = (0, 0)
 
-            for n in range(neck_y, 0, -1):
+            for n in range(neck_y, chin_y, -1):
                 if chart_data[n] > maximum[0]:
                     maximum = chart_data[n], n
 
@@ -204,6 +212,36 @@ class Widget(QWidget):
                 0,
                 mapCoordXToCutoff(chin_x),
                 640,
+            )
+
+            painter.drawLine(
+                mapCoordXToCutoff(chin_x), chin_y, mapCoordXToCutoff(neck_x), neck_y
+            )
+
+            try:
+                face_angle = math.degrees(math.asin((chin_y - neck_y) / chin_x))
+            except ZeroDivisionError:
+                face_angle = "impossible to calc. "
+
+            distance = 0
+            for y in range(chin_y, neck_y - 1):
+                delta = (
+                    self.depthmap.getpixel((chin_x, y))[0]
+                    - self.depthmap.getpixel((chin_x, y + 1))[0]
+                )
+                distance += delta
+
+            self.ui.dataOutputEdit.clear()
+            self.ui.dataOutputEdit.appendPlainText(
+                dedent(
+                    f"""
+            Highest chin point at: {chin_x:.0f},
+            Lowest neck point at: {neck_x:.0f},
+            Difference: {chin_x - neck_x:.0f},
+            Angle: {face_angle:.0f} deg,
+            Distance: {distance} pixels.
+            """
+                )
             )
 
             # debugPainter.end()
@@ -235,11 +273,40 @@ class Widget(QWidget):
         self.smallImage = smallImage
         self.depthmap = Image.open("depthmap.jpg")
 
+        image = cv2.imread(self.filename)
+        face_cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_frontalface_alt.xml"
+        )
+        face = face_cascade.detectMultiScale(image, scaleFactor=1.2, minNeighbors=4)
+
+        #
+        # Update midline point to match detected face coords
+        #
+
+        if len(face) == 1:
+            x, y, wi, he = face[0]
+
+            print(x, y, wi, he)
+            center_x = x + wi / 2
+            center_y = y + he / 2
+
+            # Set lower point somewhere around mouth (below nose, above chin)
+
+            self.ui.xValue.setValue(
+                int(round(center_x / self.image.getbbox()[2] * 480))
+            )
+            self.ui.yValue.setValue(
+                int(round((center_y + he / 4) / self.image.getbbox()[3] * 640))
+            )
+
         self.redrawImage()
 
     def loadJPEG(self, *args, **kw):
         fileName = QFileDialog.getOpenFileName(
-            self, QObject.tr("Open File"), None, QObject.tr("Images (*.jpg)")
+            self,
+            QObject.tr("Open File"),
+            os.path.expanduser("~/Downloads"),
+            QObject.tr("Images (*.jpg; *.jpeg)"),
         )
 
         if fileName[0]:
@@ -247,6 +314,10 @@ class Widget(QWidget):
 
     def setMidlinePoint(self, point, *args, **kw):
         self.ui.xValue.setValue(point.x())
+        self.ui.yValue.setValue(point.y())
+
+    def setMidlineY(self, point, *args, **kw):
+        # self.ui.xValue.setValue(point.x())
         self.ui.yValue.setValue(point.y())
 
     def load_ui(self):
@@ -271,6 +342,7 @@ class Widget(QWidget):
 
         self.ui.loadJPEGButton.clicked.connect(self.loadJPEG)
         self.ui.imageLabel.clicked.connect(self.setMidlinePoint)
+        self.ui.chartLabel.clicked.connect(self.setMidlineY)
 
         self.ui.xValue.valueChanged.connect(self.redrawImage)
         self.ui.yValue.valueChanged.connect(self.redrawImage)
