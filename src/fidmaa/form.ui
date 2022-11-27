@@ -146,6 +146,9 @@
          <property name="suffix">
           <string> pixels</string>
          </property>
+         <property name="minimum">
+          <number>1</number>
+         </property>
          <property name="maximum">
           <number>100</number>
          </property>
@@ -157,7 +160,7 @@
        <item>
         <widget class="QSlider" name="angleSlider_2">
          <property name="minimum">
-          <number>0</number>
+          <number>1</number>
          </property>
          <property name="maximum">
           <number>100</number>
