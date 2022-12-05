@@ -1,3 +1,4 @@
+import io
 import math
 import os
 import sys
@@ -6,8 +7,14 @@ from textwrap import dedent
 from typing import Optional
 
 import cv2
+import numpy
+import piexif
+import pyheif
 import PySide6
-from PIL import Image, ImageFile, ImageFilter
+from bs4 import BeautifulSoup
+from pi_heif import register_heif_opener
+from piexif import InvalidImageDataError
+from PIL import Image, ImageFile
 from PySide6 import QtGui
 from PySide6.QtCore import QFile, QObject, Qt
 from PySide6.QtGui import QColor
@@ -17,6 +24,9 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QWidget
 from calculations import findParalellPoint, findPoint
 from QClickableLabel import QClickableLabel
 
+register_heif_opener()
+
+
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 tr = QObject.tr
@@ -24,9 +34,15 @@ tr = QObject.tr
 NO_DEPTH_DATA_ERROR = """
 Looks like this image has no depth data. Make sure you took the photo  without any 'Move furthrer from the subject' message on the phone.
 
-This application currently supports selfies (photos taken with the front-facing camera) taken on the iPhone in **portrait** mode. Other kinds pictures contain no depth data.
+This application currently supports selfies (photos taken with the front-facing camera) taken on the iPhone in **portrait** mode. Other kinds of pictures probably contain no usable data.
 
-If instead of JPEG your phone transfers a HEIC/HEIF file, this means you took the photo too close or too far away. Make sure there are no "Move away from the subject" messages.
+If instead of JPEG your iPhone Xs transfers a HEIC/HEIF file, this means you took the photo too close or too far away. Make sure there are no "Move away from the subject" messages.
+"""
+
+NO_FRONT_CAMERA_NOTIFICATION = """
+Looking at the file description, it does not look like it was taken using the front camera of the iPhone (the TrueDepth camera). Chances are it probably does not contain proper depth data to use with this sofware.
+
+Please consider re-taking this picture with front ("selfie") camera in portrait mode.
 """
 
 
@@ -128,7 +144,7 @@ class Widget(QWidget):
             # debugPainter = QtGui.QPainter(debugCanvas)
 
             depthCutoff = self.ui.depthCutoffValue.value()
-            depthMax = 255 - depthCutoff
+            depthMax = 256 - depthCutoff
 
             point_beg = p2
             point_end = p1
@@ -255,30 +271,99 @@ class Widget(QWidget):
 
     def _loadJPEG(self, fileName):
         self.filename = fileName
-        image = Image.open(self.filename)
+
+        buf = io.BytesIO()
+
+        if self.filename.lower().endswith("heic") or self.filename.lower().endswith(
+            "heif"
+        ):
+            #
+            # Get depth map from HEIC/HEIF container, then proceed normally:
+            #
+            heif_container = pyheif.open_container(open(self.filename, "rb"))
+
+            primary_image = heif_container.primary_image
+
+            for exif_metadata in [
+                metadata
+                for metadata in primary_image.image.load().metadata
+                if metadata.get("type", "") == "Exif"
+            ]:
+                exif = piexif.load(exif_metadata["data"])
+                self.check_exif_data(exif)
+                break
+
+            depth_image = primary_image.depth_image.image.load()
+            self.depthmap = Image.frombytes(
+                depth_image.mode, depth_image.size, depth_image.data, "raw"
+            )
+
+            image = self.image = Image.open(self.filename)
+        else:
+            exif = None
+            try:
+                exif = piexif.load(self.filename)
+            except InvalidImageDataError:
+                pass
+
+            if exif is not None:
+                self.check_exif_data(exif)
+
+            image = Image.open(self.filename, formats=["JPEG"])
+
+            # XMP data
+            f = open(self.filename, "rb")
+            d = f.read()
+            xmp_str = b""
+
+            while d:
+                xmp_start = d.find(b"<x:xmpmeta")
+                xmp_end = d.find(b"</x:xmpmeta")
+                xmp_str += d[xmp_start : xmp_end + 12]
+                d = d[xmp_end + 12 :]
+
+            xmpAsXML = BeautifulSoup(xmp_str, features="html.parser")
+
+            found = False
+            for no, tag in enumerate(
+                xmpAsXML.findAll("apdi:auxiliaryimagetype"), start=1
+            ):
+                if tag.text.find("disparity") >= 0:
+                    found = True
+                    break
+
+            if not found:
+                no = 1
+
+            try:
+                image.seek(no)
+            except EOFError:
+                QMessageBox.critical(
+                    self,
+                    tr("FIDMAA error"),
+                    tr(NO_DEPTH_DATA_ERROR),
+                    QMessageBox.Cancel,
+                )
+                return
+
+            image.save(buf, format="png")
+            self.depthmap = Image.open(buf)
+
+            image.seek(0)
+            self.image = image
 
         smallImage = image.resize((480, 640))
-
-        try:
-            image.seek(1)
-        except EOFError:
-            QMessageBox.critical(
-                self,
-                tr("FIDMAA error"),
-                tr(NO_DEPTH_DATA_ERROR),
-                QMessageBox.Cancel,
-            )
-            return
-
-        image.save("depthmap.jpg")
-
-        self.image = image
         self.smallImage = smallImage
-        self.depthmap = Image.open("depthmap.jpg")
 
-        self.depthmap = self.depthmap.filter(ImageFilter.BLUR)
+        #
+        # Guess face position
+        #
 
-        image = cv2.imread(self.filename)
+        # frombuffer(asarray(self.image), dtype=np.uint8)
+        image = numpy.array(self.image.convert("RGB"))
+        # image = cv2.imdecode(bytes_as_np_array, 0)  # 0)  # flags)
+
+        # image = cv2.imread(self.filename)
         face_cascade = cv2.CascadeClassifier(
             cv2.data.haarcascades + "haarcascade_frontalface_alt.xml"
         )
@@ -309,12 +394,22 @@ class Widget(QWidget):
 
         self.redrawImage()
 
+    def check_exif_data(self, exif):
+        data = exif.get("Exif", {})
+        data = data.get(42036, "default")
+        if data.find(b"front TrueDepth") == -1:
+            QMessageBox.critical(
+                self,
+                tr("FIDMAA notification"),
+                tr(NO_FRONT_CAMERA_NOTIFICATION),
+            )
+
     def loadJPEG(self, *args, **kw):
         fileName = QFileDialog.getOpenFileName(
             self,
             QObject.tr("Open File"),
             os.path.expanduser("~/Downloads"),
-            QObject.tr("Images (*.jpg; *.jpeg)"),
+            QObject.tr("Images (*.jpg; *.jpeg; *.heic; *.heif)"),
         )
 
         if fileName[0]:

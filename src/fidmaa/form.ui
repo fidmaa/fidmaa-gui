@@ -33,7 +33,7 @@
        <item>
         <widget class="QPushButton" name="loadJPEGButton">
          <property name="text">
-          <string>&amp;Load JPEG</string>
+          <string>&amp;Load image</string>
          </property>
         </widget>
        </item>
