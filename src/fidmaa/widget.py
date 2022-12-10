@@ -12,6 +12,7 @@ import piexif
 import pyheif
 import PySide6
 from bs4 import BeautifulSoup
+from calculations import findParalellPoint, findPoint
 from pi_heif import register_heif_opener
 from piexif import InvalidImageDataError
 from PIL import Image, ImageFile
@@ -20,9 +21,9 @@ from PySide6.QtCore import QFile, QObject, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtUiTools import QUiLoader
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QWidget
-
-from calculations import findParalellPoint, findPoint
 from QClickableLabel import QClickableLabel
+
+from fidmaa import const, errors
 
 register_heif_opener()
 
@@ -30,20 +31,6 @@ register_heif_opener()
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 tr = QObject.tr
-
-NO_DEPTH_DATA_ERROR = """
-Looks like this image has no depth data. Make sure you took the photo  without any 'Move furthrer from the subject' message on the phone.
-
-This application currently supports selfies (photos taken with the front-facing camera) taken on the iPhone in **portrait** mode. Other kinds of pictures probably contain no usable data.
-
-If instead of JPEG your iPhone Xs transfers a HEIC/HEIF file, this means you took the photo too close or too far away. Make sure there are no "Move away from the subject" messages.
-"""
-
-NO_FRONT_CAMERA_NOTIFICATION = """
-Looking at the file description, it does not look like it was taken using the front camera of the iPhone (the TrueDepth camera). Chances are it probably does not contain proper depth data to use with this sofware.
-
-Please consider re-taking this picture with front ("selfie") camera in portrait mode.
-"""
 
 
 class Widget(QWidget):
@@ -120,6 +107,7 @@ class Widget(QWidget):
         #
 
         # Get the midpoint of a paralell line to the right
+
         rpx1, rpy1 = findParalellPoint(x, y, angle, distance=area, direction=-1)
 
         # Get the coordinates of paralell line to the right and draw it
@@ -200,9 +188,9 @@ class Widget(QWidget):
 
             minimum = (255, 0)
 
-            for n in range(
-                chin_y, len(chart_data) - 10
-            ):  # blur filter can give bad results if we go all the way down (without -10)
+            for n in range(chin_y, len(chart_data) - 10):
+                # blur filter can give bad results if we go all the way down
+                # (without -10)
                 if chart_data[n] < minimum[0]:
                     minimum = chart_data[n], n
 
@@ -269,7 +257,8 @@ class Widget(QWidget):
         painter.end()
         self.ui.chartLabel.setPixmap(canvas)
 
-    def _loadJPEG(self, fileName):
+    def _loadImage(self, fileName):
+
         self.filename = fileName
 
         buf = io.BytesIO()
@@ -290,8 +279,8 @@ class Widget(QWidget):
                 if metadata.get("type", "") == "Exif"
             ]:
                 exif = piexif.load(exif_metadata["data"])
-                self.check_exif_data(exif)
-                break
+                if not self.check_exif_data(exif):
+                    return
 
             depth_image = primary_image.depth_image.image.load()
             self.depthmap = Image.frombytes(
@@ -307,7 +296,8 @@ class Widget(QWidget):
                 pass
 
             if exif is not None:
-                self.check_exif_data(exif)
+                if not self.check_exif_data(exif):
+                    return
 
             image = Image.open(self.filename, formats=["JPEG"])
 
@@ -317,6 +307,7 @@ class Widget(QWidget):
             xmp_str = b""
 
             while d:
+
                 xmp_start = d.find(b"<x:xmpmeta")
                 xmp_end = d.find(b"</x:xmpmeta")
                 xmp_str += d[xmp_start : xmp_end + 12]
@@ -325,7 +316,8 @@ class Widget(QWidget):
             xmpAsXML = BeautifulSoup(xmp_str, features="html.parser")
 
             found = False
-            for no, tag in enumerate(
+
+            for _no, tag in enumerate(
                 xmpAsXML.findAll("apdi:auxiliaryimagetype"), start=1
             ):
                 if tag.text.find("disparity") >= 0:
@@ -333,17 +325,12 @@ class Widget(QWidget):
                     break
 
             if not found:
-                no = 1
+                _no = 1
 
             try:
-                image.seek(no)
+                image.seek(_no)
             except EOFError:
-                QMessageBox.critical(
-                    self,
-                    tr("FIDMAA error"),
-                    tr(NO_DEPTH_DATA_ERROR),
-                    QMessageBox.Cancel,
-                )
+                self.critical_error(errors.NO_DEPTH_DATA_ERROR)
                 return
 
             image.save(buf, format="png")
@@ -359,11 +346,8 @@ class Widget(QWidget):
         # Guess face position
         #
 
-        # frombuffer(asarray(self.image), dtype=np.uint8)
         image = numpy.array(self.image.convert("RGB"))
-        # image = cv2.imdecode(bytes_as_np_array, 0)  # 0)  # flags)
 
-        # image = cv2.imread(self.filename)
         face_cascade = cv2.CascadeClassifier(
             cv2.data.haarcascades + "haarcascade_frontalface_alt.xml"
         )
@@ -383,26 +367,63 @@ class Widget(QWidget):
             center_x = x + wi / 2
             center_y = y + he / 2
 
+            # calculate percentage of the face
+            img_wi, img_he = self.image.getbbox()[2:4]
+            percent_width = float(wi) / float(img_wi)
+            percent_height = float(he) / float(img_he)
+
+            if (
+                percent_width < const.MINIMUM_FACE_WIDTH_PERCENT
+                or percent_height < const.MINIMUM_FACE_HEIGHT_PERCENT
+            ):
+                self.critical_error(
+                    errors.FACE_TOO_SMALL.format(
+                        percent_width=percent_width * 100,
+                        percent_height=percent_height * 100,
+                        minimum_width=const.MINIMUM_FACE_WIDTH_PERCENT * 100,
+                        minimum_height=const.MINIMUM_FACE_HEIGHT_PERCENT * 100,
+                    )
+                )
+
             # Set lower point somewhere around mouth (below nose, above chin)
 
-            self.ui.xValue.setValue(
-                int(round(center_x / self.image.getbbox()[2] * 480))
-            )
-            self.ui.yValue.setValue(
-                int(round((center_y + he / 4) / self.image.getbbox()[3] * 640))
-            )
+            self.ui.xValue.setValue(int(round(center_x / img_wi * 480)))
+            self.ui.yValue.setValue(int(round((center_y + he / 4) / img_he * 640)))
+
+        elif len(face) == 0:
+            self.critical_error(errors.FACE_NOT_DETECTED)
+
+        else:
+            self.critical_error(errors.MULTIPLE_FACES_DETECTED)
 
         self.redrawImage()
+
+    def critical_error(self, err):
+        QMessageBox.critical(
+            self,
+            tr("FIDMAA error"),
+            tr(err),
+            QMessageBox.Cancel,
+        )
 
     def check_exif_data(self, exif):
         data = exif.get("Exif", {})
         data = data.get(42036, "default")
-        if data.find(b"front TrueDepth") == -1:
+        if type(data) == str:
+            ret = data.find(const.TRUEDEPTH_EXIF_ID)
+        elif type(data) == bytes:
+            ret = data.find(const.TRUEDEPTH_EXIF_ID.encode("ascii"))
+        else:
+            ret = -1
+
+        if ret == -1:
             QMessageBox.critical(
                 self,
                 tr("FIDMAA notification"),
-                tr(NO_FRONT_CAMERA_NOTIFICATION),
+                tr(errors.NO_FRONT_CAMERA_NOTIFICATION),
             )
+            return False
+        return True
 
     def loadJPEG(self, *args, **kw):
         fileName = QFileDialog.getOpenFileName(
@@ -413,7 +434,7 @@ class Widget(QWidget):
         )
 
         if fileName[0]:
-            self._loadJPEG(fileName[0])
+            self._loadImage(fileName[0])
 
     def setMidlinePoint(self, point, *args, **kw):
         self.ui.xValue.setValue(point.x())
@@ -465,7 +486,7 @@ if __name__ == "__main__":
 
     try:
         if sys.argv[1]:
-            widget._loadJPEG(sys.argv[1])
+            widget._loadImage(sys.argv[1])
     except IndexError:
         pass
 
