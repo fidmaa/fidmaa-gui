@@ -39,7 +39,7 @@ FACE_NOT_DETECTED = tr(
     """<p>
 Face was not detected in this image.
 </p><p>
-In case this is an image with the neck extended, you're probalby okay and you can take the
+In case this is an image with the neck extended, you're probably okay and you can take the
 measurements.
 </p><p>
 In case this is the image of the face, it means that it is probably hardly readable,
