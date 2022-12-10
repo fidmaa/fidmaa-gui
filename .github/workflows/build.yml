@@ -9,15 +9,18 @@ jobs:
     runs-on: macos-12
     steps:
       - uses: actions/checkout@v2
+
+      - name: Setup path
+        run: echo "$HOME/.local/bin" >> $GITHUB_PATH
         
       - name: Install Poetry
         run: curl -sSL https://install.python-poetry.org | python3 -
         
       - name: Install deps
-        run: /Users/runner/.local/bin/poetry install --no-root
+        run: poetry install --no-root
         
       - name: Run PyInstaller
-        run: /Users/runner/.local/bin/poetry run pyinstaller --windowed  --add-data "src/fidmaa/form.ui:." src/application.py
+        run: poetry run pyinstaller --windowed  --add-data "src/fidmaa/form.ui:." src/application.py
 
       - name: Copy files
         run: make macos-copy-files
