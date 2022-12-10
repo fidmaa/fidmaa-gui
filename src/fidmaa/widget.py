@@ -409,10 +409,16 @@ class Widget(QWidget):
     def check_exif_data(self, exif):
         data = exif.get("Exif", {})
         data = data.get(42036, "default")
+
         if type(data) == str:
             ret = data.find(const.TRUEDEPTH_EXIF_ID)
+            print_data = data
         elif type(data) == bytes:
             ret = data.find(const.TRUEDEPTH_EXIF_ID.encode("ascii"))
+            try:
+                print_data = data.decode("ascii")
+            except BaseException:
+                print_data = "cannot encode"
         else:
             ret = -1
 
@@ -420,7 +426,9 @@ class Widget(QWidget):
             QMessageBox.critical(
                 self,
                 tr("FIDMAA notification"),
-                tr(errors.NO_FRONT_CAMERA_NOTIFICATION),
+                errors.NO_FRONT_CAMERA_NOTIFICATION.format(
+                    exif_camera_description=print_data
+                ),
             )
             return False
         return True

@@ -21,12 +21,17 @@ Looking at the file description, it does not look like it was taken using the fr
 of the iPhone (the TrueDepth camera). Chances are it probably does not contain proper depth
 data to use with this sofware.
 </p><p>
-Please consider re-taking this picture with front ("selfie") camera in portrait mode.
+Please consider re-taking this picture with front ("selfie") camera in portrait orientation and
+in portrait mode. Make sure the phone doesn's say "please move furthrer away from the object".
+Please make sure the phone detects your face.
 </p><p>
 If this image was taken with the front iPhone camera in portrait mode, chances are it was
 shared to you via an incompatible method. Please remember, that sharing the image via AirDrop,
 via iCloud or via Photos app is safe. If you recevied this image via Messages app, it was probably
 stripped out of important information and thus cannot be used for measurements.
+</p><p>
+Current camera description (as seen in the file): "{exif_camera_description}" -- if it contains
+"back camera", it means you used the wrong one, you need to use front ("selfie") camera. .
 </p>"""
 )
 
@@ -37,7 +42,8 @@ Face was not detected in this image.
 In case this is an image with the neck extended, you're probalby okay and you can take the
 measurements.
 </p><p>
-In case this is face image, it means that it is probably hardly readable. In this case,
+In case this is the image of the face, it means that it is probably hardly readable,
+taken in improper lighting conditions or there is another problem with the image. In this case,
 please re-take the picture.
 </p>"""
 )
@@ -45,20 +51,26 @@ please re-take the picture.
 FACE_TOO_SMALL = tr(
     """<p>
 Face was detected and it looks like it is too small. You should probably re-take the
-picture and make sure it is close enough so that the face area takes at least {minimum_width:.2f}% of
+picture and make sure it is close enough so that the face area takes at least
+{minimum_width:.2f}% of
 width of the photo and the height of the face is at least {minimum_height:.2f}% of the photo.
 </p><p>
 In case this is an image with the neck extended, you're probalby okay and you can take
 the measurements.
 </p><p>
-Current face measurements: width&nbsp;is&nbsp;{percent_width:.2f}&nbsp;%, height&nbsp;is&nbsp;{percent_height:.2f}&nbsp;%.
+Current face measurements: <br/>
+width&nbsp;is&nbsp;{percent_width:.2f}&nbsp;%,<br/>
+height&nbsp;is&nbsp;{percent_height:.2f}&nbsp;%.
 </p>"""
 )
 
 MULTIPLE_FACES_DETECTED = tr(
     """<p>
-Multiple faces detected on the picture. You should probably re-take the picture and make sure that there is only one face and it is close enough, so the face area takes at least 60-75% of the photo.
+Multiple faces detected on the picture. You should probably re-take the picture and make sure
+that there is only one face and it is close enough, so the face area takes at least 60-75% of
+the photo.
 </p><p>
-In case this is an image with the neck extended, you're probalby okay and you can take the measurements.
+In case this is an image with the neck extended, you're probalby okay and you can take the
+measurements.
 </p>"""
 )
