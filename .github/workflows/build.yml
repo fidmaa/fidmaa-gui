@@ -1,0 +1,15 @@
+jobs:
+  build:
+    runs-on: macos-12
+     steps:
+      - uses: actions/checkout@v2
+        
+      - name: Install Poetry
+        run: curl -sSL https://install.python-poetry.org | python3 -
+        
+      - name: Install deps
+        run: poetry install --no-root
+        
+      - name: Build
+        run: make clean macos
+        
