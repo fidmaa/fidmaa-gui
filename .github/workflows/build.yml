@@ -16,9 +16,12 @@ jobs:
       - name: Install deps
         run: /Users/runner/.local/bin/poetry install --no-root
         
-      - name: Build
+      - name: Run PyInstaller
         run: /Users/runner/.local/bin/poetry run pyinstaller --windowed  --add-data "src/fidmaa/form.ui:." src/application.py
 
-      - name: Build 2
+      - name: Copy files
         run: make macos-copy-files
+
+      - name: Build ZIP
+        run: make zip-app
         
