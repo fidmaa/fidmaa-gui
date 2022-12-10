@@ -17,5 +17,8 @@ jobs:
         run: /Users/runner/.local/bin/poetry install --no-root
         
       - name: Build
-        run: make clean macos
+        run: /Users/runner/.local/bin/poetry run pyinstaller --windowed  --add-data "src/fidmaa/form.ui:." src/application.py
+
+      - name: Build 2
+        run: make macos-copy-files
         
