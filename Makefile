@@ -10,8 +10,12 @@ clean:
 	find . -name \*\\.log -print0 | xargs -0 rm -f
 	rm -rf .tox build dist
 
-macos:
+macos: macos-build macos-copy-files
+
+macos-build:
 	pyinstaller --windowed  --add-data "src/fidmaa/form.ui:." src/application.py
+
+macos-copy-files:
 	cp -R ~/.virtualenvs/fidmaa/lib/python*/site-packages/cv2/data/ ~/Programowanie/fidmaa/dist/application.app/Contents/MacOS/cv2/data/
 	mkdir -p ~/Programowanie/fidmaa/dist/application.app/Contents/MacOS/pyheif/data/
 	cp -R ~/.virtualenvs/fidmaa/lib/python*/site-packages/pyheif/data/ ~/Programowanie/fidmaa/dist/application.app/Contents/MacOS/pyheif/data/
