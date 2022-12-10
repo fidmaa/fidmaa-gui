@@ -12,7 +12,6 @@ import piexif
 import pyheif
 import PySide6
 from bs4 import BeautifulSoup
-from calculations import findParalellPoint, findPoint
 from pi_heif import register_heif_opener
 from piexif import InvalidImageDataError
 from PIL import Image, ImageFile
@@ -21,9 +20,10 @@ from PySide6.QtCore import QFile, QObject, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtUiTools import QUiLoader
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QWidget
-from QClickableLabel import QClickableLabel
 
-from fidmaa import const, errors
+from . import const, errors
+from .calculations import findParalellPoint, findPoint
+from .QClickableLabel import QClickableLabel
 
 register_heif_opener()
 
@@ -363,7 +363,6 @@ class Widget(QWidget):
         if len(face) == 1:
             x, y, wi, he = face[0]
 
-            print(x, y, wi, he)
             center_x = x + wi / 2
             center_y = y + he / 2
 
@@ -466,7 +465,11 @@ class Widget(QWidget):
 
         loader = MyQUiLoader()
 
-        path = Path(__file__).resolve().parent / "form.ui"
+        if hasattr(sys, "_MEIPASS"):
+            path = os.path.join(sys._MEIPASS, "form.ui")
+        else:
+            path = Path(__file__).resolve().parent / "form.ui"
+
         ui_file = QFile(path)
         ui_file.open(QFile.ReadOnly)
         self.ui = loader.load(ui_file, self)
@@ -486,7 +489,7 @@ class Widget(QWidget):
         self.ui.angleSlider.setValue(90)
 
 
-if __name__ == "__main__":
+def main():
     app = QApplication(sys.argv)
 
     widget = Widget()
