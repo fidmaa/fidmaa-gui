@@ -4,14 +4,19 @@ tr = QObject.tr
 
 NO_DEPTH_DATA_ERROR = tr(
     """<p>
-Looks like this image has no depth data. Make sure you took the photo  without any
-'Move furthrer from the subject' message on the phone.
+Looks like this image has no depth data.
 </p><p>
+Make sure you took the photo with:</p><ul>
+<li>iPhone Xs, 12, 13, 14, 15 or better</li>
+<li><b>FRONT</b> camera ("selfie" camera)</li>
+<li>you enabled "Portrait" mode for this image (the mode that blurrs the background behind the
+person)</li>
+<li>there was a YELLOW border around the subject's face.</li>
+<li>there were no 'Move furthrer from the subject' messages on the phone</li>
+</ul>
+<p>
 This application currently supports selfies (photos taken with the front-facing camera)
-taken on the iPhone in **portrait** mode. Other kinds of pictures probably contain no usable data.
-</p><p>
-If instead of JPEG your iPhone Xs transfers a HEIC/HEIF file, this means you took the
-photo too close or too far away. Make sure there are no "Move away from the subject" messages.
+taken on the iPhone in portrait mode.
 </p>"""
 )
 

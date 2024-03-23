@@ -12,7 +12,6 @@ import piexif
 import pyheif
 import PySide6
 from bs4 import BeautifulSoup
-from pi_heif import register_heif_opener
 from piexif import InvalidImageDataError
 from PIL import Image, ImageFile
 from PySide6 import QtGui
@@ -25,7 +24,7 @@ from . import const, errors
 from .calculations import findParalellPoint, findPoint
 from .QClickableLabel import QClickableLabel
 
-register_heif_opener()
+# register_heif_opener()
 
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -53,7 +52,6 @@ class Widget(QWidget):
         self.redrawImage()
 
     def redrawImage(self, *args, **kw):
-
         canvas = self.ui.imageLabel.pixmap()
         painter = QtGui.QPainter(canvas)
         painter.setPen(QColor(0, 0, 255, 127))
@@ -63,8 +61,8 @@ class Widget(QWidget):
 
         # Calculate 2 points at the edge of the image, using the angle.
 
-        x = self.ui.xValue.value()
-        chin_y = y = self.ui.yValue.value()
+        mouse_x = x = self.ui.xValue.value()
+        chin_y = y = mouse_y = self.ui.yValue.value()
         angle = self.ui.angleValue.value()
         area = self.ui.areaValue.value()
 
@@ -148,7 +146,6 @@ class Widget(QWidget):
 
             chart_data = []
             for y in range(0, 640):
-
                 sx = point_beg.x() + y * dx
                 sy = y
 
@@ -169,7 +166,10 @@ class Widget(QWidget):
                 # debugPainter.drawLine(lpx, lpy, rpx, rpy)
 
                 for x in range(int(round(lpx)), int(round(rpx))):
-                    depths.append(self.depthmap.getpixel((x, lpy + dy * x))[0])
+                    try:
+                        depths.append(self.depthmap.getpixel((x, lpy + dy * x))[0])
+                    except IndexError:
+                        depths.append(0)
 
                 depth = sum(depths) / len(depths)
 
@@ -241,12 +241,14 @@ class Widget(QWidget):
             self.ui.dataOutputEdit.clear()
             self.ui.dataOutputEdit.appendPlainText(
                 dedent(
-                    f"""
-            Highest chin point at: {chin_x:.0f},
+                    f"""Highest chin point at: {chin_x:.0f},
             Lowest neck point at: {neck_x:.0f},
             Difference: {chin_x - neck_x:.0f},
             Angle: {face_angle} deg,
             Distance: {distance} pixels.
+
+            Depth map coords: {mouse_x, mouse_y}
+            Depth map value (closeness): {self.depthmap.getpixel((mouse_x, mouse_y))[0]}
             """
                 )
             )
@@ -258,7 +260,6 @@ class Widget(QWidget):
         self.ui.chartLabel.setPixmap(canvas)
 
     def _loadImage(self, fileName):
-
         self.filename = fileName
 
         buf = io.BytesIO()
@@ -282,12 +283,23 @@ class Widget(QWidget):
                 if not self.check_exif_data(exif):
                     return
 
+            if primary_image.depth_image is None:
+                self.critical_error(errors.NO_DEPTH_DATA_ERROR)
+                return
+
             depth_image = primary_image.depth_image.image.load()
             self.depthmap = Image.frombytes(
                 depth_image.mode, depth_image.size, depth_image.data, "raw"
             )
+            self.depthmap.save("fubar.png")
 
-            image = self.image = Image.open(self.filename)
+            picture_image = primary_image.image.load()
+            print(picture_image.size)
+            image = self.image = Image.frombytes(
+                picture_image.mode,
+                (picture_image.size[0] + 4, picture_image.size[1] - 1),
+                picture_image.data,
+            )
         else:
             exif = None
             try:
@@ -307,7 +319,6 @@ class Widget(QWidget):
             xmp_str = b""
 
             while d:
-
                 xmp_start = d.find(b"<x:xmpmeta")
                 xmp_end = d.find(b"</x:xmpmeta")
                 xmp_str += d[xmp_start : xmp_end + 12]
@@ -386,8 +397,8 @@ class Widget(QWidget):
 
             # Set lower point somewhere around mouth (below nose, above chin)
 
-            self.ui.xValue.setValue(int(round(center_x / img_wi * 480)))
-            self.ui.yValue.setValue(int(round((center_y + he / 4) / img_he * 640)))
+            self.ui.xValue.setValue(int(round(center_x / img_wi * 479)))
+            self.ui.yValue.setValue(int(round((center_y + he / 4) / img_he * 639)))
 
         elif len(face) == 0:
             self.critical_error(errors.FACE_NOT_DETECTED)
