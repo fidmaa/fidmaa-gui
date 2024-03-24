@@ -20,7 +20,7 @@ jobs:
         run: poetry install --no-root
         
       - name: Run PyInstaller
-        run: poetry run pyinstaller --windowed  --add-data "src/fidmaa/form.ui:." src/application.py
+        run: poetry run pyinstaller --windowed  --add-data "src/fidmaa_gui/form.ui:." src/entrypoints.py
 
       - name: Copy files
         run: make macos-copy-files
