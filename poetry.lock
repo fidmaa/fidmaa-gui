@@ -459,6 +459,25 @@ typing = ["typing-extensions"]
 xmp = ["defusedxml"]
 
 [[package]]
+name = "portrait-analyser"
+version = "0.1.2"
+description = "Python module for portrait picture analysis"
+optional = false
+python-versions = "<4.0,>=3.12"
+files = [
+    {file = "portrait_analyser-0.1.2-py3-none-any.whl", hash = "sha256:5d91323827f60598139669a122422f69ff281a17d04000b81cb90db4f3169672"},
+    {file = "portrait_analyser-0.1.2.tar.gz", hash = "sha256:4c20877b0e5aced0744ec0c6f8e76dfd7c7713bfcfd7c58b2c9775d43d21cfbe"},
+]
+
+[package.dependencies]
+numpy = ">=1.26.4,<2.0.0"
+opencv-python = ">=4.9.0.80,<5.0.0.0"
+piexif = ">=1.1.3,<2.0.0"
+pillow = ">=10.2.0,<11.0.0"
+pyheif = {version = ">=0.7.1,<0.8.0", markers = "sys_platform == \"linux\""}
+pyheif-iplweb = {version = ">=0.7.1.dev1176,<0.8.0", markers = "sys_platform == \"darwin\""}
+
+[[package]]
 name = "prompt-toolkit"
 version = "3.0.43"
 description = "Library for building powerful interactive command lines in Python"
@@ -522,6 +541,27 @@ files = [
 [package.extras]
 plugins = ["importlib-metadata"]
 windows-terminal = ["colorama (>=0.4.6)"]
+
+[[package]]
+name = "pyheif"
+version = "0.7.1"
+description = "Python 3.6+ interface to libheif library"
+optional = false
+python-versions = ">= 3.6"
+files = [
+    {file = "pyheif-0.7.1-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:99c4df0588f65c1e4bb2a184338980e4810b70641f1df6414841c089f8273175"},
+    {file = "pyheif-0.7.1-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:1e55e36c9c704f86045122719be0b511ecb585c90c71fe9b7dbf602e37081686"},
+    {file = "pyheif-0.7.1-cp36-cp36m-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:d1b6a553028ae21cc874acdacf925585b163096d1d71311092b8f15b215c61ea"},
+    {file = "pyheif-0.7.1-cp37-cp37m-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:f7aa211959538954ceeb69d64c8910445f78fa7bf3da850dcdd3512b9342a417"},
+    {file = "pyheif-0.7.1-cp38-cp38-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:7577c7d28f795145a549349fc7125f2ffa54ad9341b1db9701c0c86615a0f3ed"},
+    {file = "pyheif-0.7.1-cp39-cp39-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:aa6e37ef23a8049225c7185c7a3fef66109c7f1c8e6ba7894f60d3689e2997ad"},
+    {file = "pyheif-0.7.1-pp37-pypy37_pp73-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:5cb43912f35ab0ad503d1d7dc974b93fde78248b3563d7ff665d2508b161ff27"},
+    {file = "pyheif-0.7.1-pp38-pypy38_pp73-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:407d2ac679e0a093c11e9f6423de9692ab9b22ac0e18f51123d78e877cd049c8"},
+    {file = "pyheif-0.7.1.tar.gz", hash = "sha256:86a5c5174379d7146b5ed1a68892faf7268a135fb7f5039a011bfb7a6e903200"},
+]
+
+[package.dependencies]
+cffi = ">=1.0.0"
 
 [[package]]
 name = "pyheif-iplweb"
@@ -747,4 +787,4 @@ files = [
 [metadata]
 lock-version = "2.0"
 python-versions = "~3.12"
-content-hash = "855288d78658d0224b2f0c19951f754fa66c96892ed4071edcb0fc1dc6c19e03"
+content-hash = "5136fc74c522e758d0c5fcec90a11ee9aa74d11c897735cc748e162cedf677e7"
