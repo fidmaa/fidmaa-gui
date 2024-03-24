@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "fidmaa-gui"
-version = "0.1.1"
+version = "0.1.2"
 description = "What's FIDMAA?"
 authors = ["Michał Pasternak <michal.dtz@gmail.com>"]
 license = "MIT"
