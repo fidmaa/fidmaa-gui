@@ -34,7 +34,7 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 tr = QObject.tr
 
 
-class Widget(QWidget):
+class MainWindow(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.load_ui()
@@ -399,13 +399,14 @@ class Widget(QWidget):
 def main():
     app = QApplication(sys.argv)
 
-    widget = Widget()
-    widget.show()
+    mainWindow = MainWindow()
+    mainWindow.updateWindowTitle()
+    mainWindow.show()
 
     try:
         if sys.argv[1]:
-            widget._loadImage(sys.argv[1])
+            mainWindow._loadImage(sys.argv[1])
     except IndexError:
-        pass
+        mainWindow.loadJPEG()
 
     sys.exit(app.exec())
