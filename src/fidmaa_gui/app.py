@@ -334,14 +334,20 @@ class Widget(QWidget):
         )
 
     def loadJPEG(self, *args, **kw):
+        settings = QSettings("FIDMAA")
+        last_directory_used = settings.value(
+            const.LAST_DIRECTORY_USED, os.path.expanduser("~/Downloads")
+        )
+
         fileName = QFileDialog.getOpenFileName(
             self,
             QObject.tr("Open File"),
-            os.path.expanduser("~/Downloads"),
+            last_directory_used,
             QObject.tr("Images (*.jpg; *.jpeg; *.heic; *.heif)"),
         )
 
         if fileName[0]:
+            settings.setValue(const.LAST_DIRECTORY_USED, os.path.dirname(fileName[0]))
             self._loadImage(fileName[0])
 
     def setMidlinePoint(self, point, *args, **kw):
