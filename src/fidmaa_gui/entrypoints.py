@@ -1,3 +1,9 @@
 from fidmaa_gui import app
 
-app.main()
+
+def run():
+    app.main()
+
+
+if __name__ == "__main__":
+    run()
