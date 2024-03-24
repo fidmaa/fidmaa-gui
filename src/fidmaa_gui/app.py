@@ -6,6 +6,7 @@ from textwrap import dedent
 from typing import Optional
 
 import PySide6
+from fidmaa_simple_viewer.core import FIDMAA_to_pyvista_surface
 from PIL import ImageFile
 from portrait_analyser.exceptions import (
     ExifValidationFailed,
@@ -17,7 +18,7 @@ from portrait_analyser.exceptions import (
 from portrait_analyser.face import get_face_parameters
 from portrait_analyser.ios import load_image
 from PySide6 import QtGui
-from PySide6.QtCore import QFile, QObject, Qt
+from PySide6.QtCore import QFile, QObject, QSettings, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtUiTools import QUiLoader
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QWidget
@@ -370,6 +371,17 @@ class MainWindow(QWidget):
         # self.ui.xValue.setValue(point.x())
         self.ui.yValue.setValue(point.y())
 
+    def open3DView(self):
+        surface, texture = FIDMAA_to_pyvista_surface(self.image, self.depthmap)
+        from pyvistaqt import BackgroundPlotter
+
+        plotter = BackgroundPlotter(
+            line_smoothing=True, title=self.getWindowTitle(self.filename, "3D view")
+        )
+        plotter.add_mesh(surface, texture=texture)
+        plotter.add_text("FIDMAA (C) 2022-2024 Michal Pasternak & collaborators ")
+        plotter.show()
+
     def load_ui(self):
         class MyQUiLoader(QUiLoader):
             def createWidget(
@@ -395,6 +407,7 @@ class MainWindow(QWidget):
         ui_file.close()
 
         self.ui.loadJPEGButton.clicked.connect(self.loadJPEG)
+        self.ui.open3DViewButton.clicked.connect(self.open3DView)
         self.ui.imageLabel.clicked.connect(self.setMidlinePoint)
         self.ui.chartLabel.clicked.connect(self.setMidlineY)
 
