@@ -26,9 +26,6 @@ from . import const, errors
 from .calculations import findParalellPoint, findPoint
 from .QClickableLabel import QClickableLabel
 
-# register_heif_opener()
-
-
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 tr = QObject.tr
