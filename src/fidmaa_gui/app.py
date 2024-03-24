@@ -1,4 +1,3 @@
-import io
 import math
 import os
 import sys
@@ -6,14 +5,17 @@ from pathlib import Path
 from textwrap import dedent
 from typing import Optional
 
-import cv2
-import numpy
-import piexif
-import pyheif
 import PySide6
-from bs4 import BeautifulSoup
-from piexif import InvalidImageDataError
-from PIL import Image, ImageFile
+from PIL import ImageFile
+from portrait_analyser.exceptions import (
+    ExifValidationFailed,
+    MultipleFacesDetected,
+    NoDepthMapFound,
+    NoFacesDetected,
+    UnknownExtension,
+)
+from portrait_analyser.face import get_face_parameters
+from portrait_analyser.ios import load_image
 from PySide6 import QtGui
 from PySide6.QtCore import QFile, QObject, Qt
 from PySide6.QtGui import QColor
@@ -262,149 +264,65 @@ class Widget(QWidget):
     def _loadImage(self, fileName):
         self.filename = fileName
 
-        buf = io.BytesIO()
-
-        if self.filename.lower().endswith("heic") or self.filename.lower().endswith(
-            "heif"
-        ):
-            #
-            # Get depth map from HEIC/HEIF container, then proceed normally:
-            #
-            heif_container = pyheif.open_container(open(self.filename, "rb"))
-
-            primary_image = heif_container.primary_image
-
-            for exif_metadata in [
-                metadata
-                for metadata in primary_image.image.load().metadata
-                if metadata.get("type", "") == "Exif"
-            ]:
-                exif = piexif.load(exif_metadata["data"])
-                if not self.check_exif_data(exif):
-                    return
-
-            if primary_image.depth_image is None:
-                self.critical_error(errors.NO_DEPTH_DATA_ERROR)
-                return
-
-            depth_image = primary_image.depth_image.image.load()
-            self.depthmap = Image.frombytes(
-                depth_image.mode, depth_image.size, depth_image.data, "raw"
-            )
-            self.depthmap.save("fubar.png")
-
-            picture_image = primary_image.image.load()
-            print(picture_image.size)
-            image = self.image = Image.frombytes(
-                picture_image.mode,
-                (picture_image.size[0] + 4, picture_image.size[1] - 1),
-                picture_image.data,
-            )
-        else:
-            exif = None
-            try:
-                exif = piexif.load(self.filename)
-            except InvalidImageDataError:
-                pass
-
-            if exif is not None:
-                if not self.check_exif_data(exif):
-                    return
-
-            image = Image.open(self.filename, formats=["JPEG"])
-
-            # XMP data
-            f = open(self.filename, "rb")
-            d = f.read()
-            xmp_str = b""
-
-            while d:
-                xmp_start = d.find(b"<x:xmpmeta")
-                xmp_end = d.find(b"</x:xmpmeta")
-                xmp_str += d[xmp_start : xmp_end + 12]
-                d = d[xmp_end + 12 :]
-
-            xmpAsXML = BeautifulSoup(xmp_str, features="html.parser")
-
-            found = False
-
-            for _no, tag in enumerate(
-                xmpAsXML.findAll("apdi:auxiliaryimagetype"), start=1
-            ):
-                if tag.text.find("disparity") >= 0:
-                    found = True
-                    break
-
-            if not found:
-                _no = 1
-
-            try:
-                image.seek(_no)
-            except EOFError:
-                self.critical_error(errors.NO_DEPTH_DATA_ERROR)
-                return
-
-            image.save(buf, format="png")
-            self.depthmap = Image.open(buf)
-
-            image.seek(0)
-            self.image = image
-
-        smallImage = image.resize((480, 640))
-        self.smallImage = smallImage
-
-        #
-        # Guess face position
-        #
-
-        image = numpy.array(self.image.convert("RGB"))
-
-        face_cascade = cv2.CascadeClassifier(
-            cv2.data.haarcascades + "haarcascade_frontalface_alt.xml"
-        )
         try:
-            face = face_cascade.detectMultiScale(image, scaleFactor=1.2, minNeighbors=4)
-        except BaseException:
-            face = []
+            self.image, self.depthmap = load_image(self.filename)
+        except ExifValidationFailed as e:
+            QMessageBox.critical(
+                self,
+                tr("FIDMAA notification"),
+                errors.NO_FRONT_CAMERA_NOTIFICATION.format(exif_camera_description=e),
+            )
+            return
+
+        except NoDepthMapFound:
+            self.critical_error(errors.NO_DEPTH_DATA_ERROR)
+            return
+
+        except UnknownExtension as e:
+            self.critical_error(QObject.tr("Unknown file extension (%s)" % e))
+            return
+
+        self.smallImage = self.image.resize((480, 640))
 
         #
-        # Update midline point to match detected face coords
+        # Get face position, if any:
         #
 
-        if len(face) == 1:
-            x, y, wi, he = face[0]
-
-            center_x = x + wi / 2
-            center_y = y + he / 2
-
-            # calculate percentage of the face
-            img_wi, img_he = self.image.getbbox()[2:4]
-            percent_width = float(wi) / float(img_wi)
-            percent_height = float(he) / float(img_he)
-
-            if (
-                percent_width < const.MINIMUM_FACE_WIDTH_PERCENT
-                or percent_height < const.MINIMUM_FACE_HEIGHT_PERCENT
-            ):
-                self.critical_error(
-                    errors.FACE_TOO_SMALL.format(
-                        percent_width=percent_width * 100,
-                        percent_height=percent_height * 100,
-                        minimum_width=const.MINIMUM_FACE_WIDTH_PERCENT * 100,
-                        minimum_height=const.MINIMUM_FACE_HEIGHT_PERCENT * 100,
-                    )
-                )
-
-            # Set lower point somewhere around mouth (below nose, above chin)
-
-            self.ui.xValue.setValue(int(round(center_x / img_wi * 479)))
-            self.ui.yValue.setValue(int(round((center_y + he / 4) / img_he * 639)))
-
-        elif len(face) == 0:
+        try:
+            (
+                center_x,
+                center_y,
+                wi,
+                he,
+                percent_width,
+                percent_height,
+            ) = get_face_parameters(self.image)
+        except NoFacesDetected:
             self.critical_error(errors.FACE_NOT_DETECTED)
+            return
 
-        else:
+        except MultipleFacesDetected:
             self.critical_error(errors.MULTIPLE_FACES_DETECTED)
+            return
+
+        if (
+            percent_width < const.MINIMUM_FACE_WIDTH_PERCENT
+            or percent_height < const.MINIMUM_FACE_HEIGHT_PERCENT
+        ):
+            self.critical_error(
+                errors.FACE_TOO_SMALL.format(
+                    percent_width=percent_width * 100,
+                    percent_height=percent_height * 100,
+                    minimum_width=const.MINIMUM_FACE_WIDTH_PERCENT * 100,
+                    minimum_height=const.MINIMUM_FACE_HEIGHT_PERCENT * 100,
+                )
+            )
+        # Set lower point somewhere around mouth (below nose, above chin)
+
+        self.ui.xValue.setValue(int(round(center_x / self.image.size[0] * 479)))
+        self.ui.yValue.setValue(
+            int(round((center_y + he / 4) / self.image.size[1] * 639))
+        )
 
         self.redrawImage()
 
@@ -415,33 +333,6 @@ class Widget(QWidget):
             tr(err),
             QMessageBox.Cancel,
         )
-
-    def check_exif_data(self, exif):
-        data = exif.get("Exif", {})
-        data = data.get(42036, "default")
-
-        if type(data) == str:
-            ret = data.find(const.TRUEDEPTH_EXIF_ID)
-            print_data = data
-        elif type(data) == bytes:
-            ret = data.find(const.TRUEDEPTH_EXIF_ID.encode("ascii"))
-            try:
-                print_data = data.decode("ascii")
-            except BaseException:
-                print_data = "cannot encode"
-        else:
-            ret = -1
-
-        if ret == -1:
-            QMessageBox.critical(
-                self,
-                tr("FIDMAA notification"),
-                errors.NO_FRONT_CAMERA_NOTIFICATION.format(
-                    exif_camera_description=print_data
-                ),
-            )
-            return False
-        return True
 
     def loadJPEG(self, *args, **kw):
         fileName = QFileDialog.getOpenFileName(
