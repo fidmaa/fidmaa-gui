@@ -321,6 +321,21 @@ class MainWindow(QWidget):
             )
 
         self.redrawImage()
+        self.updateWindowTitle()
+
+    def getWindowTitle(self, fileName=None, fun=None):
+        ret = "FIDMAA GUI"
+        if fileName:
+            ret += " - " + fileName
+        if fun:
+            ret += " - " + fun
+        return ret
+
+    def updateWindowTitle(self):
+        fn = self.filename
+        if fn is not None:
+            fn = os.path.basename(fn)
+        self.setWindowTitle(self.getWindowTitle(fn))
 
     def critical_error(self, err):
         QMessageBox.critical(
