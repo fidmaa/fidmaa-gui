@@ -299,30 +299,29 @@ class Widget(QWidget):
             ) = get_face_parameters(self.image)
         except NoFacesDetected:
             self.critical_error(errors.FACE_NOT_DETECTED)
-            return
 
         except MultipleFacesDetected:
             self.critical_error(errors.MULTIPLE_FACES_DETECTED)
-            return
 
-        if (
-            percent_width < const.MINIMUM_FACE_WIDTH_PERCENT
-            or percent_height < const.MINIMUM_FACE_HEIGHT_PERCENT
-        ):
-            self.critical_error(
-                errors.FACE_TOO_SMALL.format(
-                    percent_width=percent_width * 100,
-                    percent_height=percent_height * 100,
-                    minimum_width=const.MINIMUM_FACE_WIDTH_PERCENT * 100,
-                    minimum_height=const.MINIMUM_FACE_HEIGHT_PERCENT * 100,
+        else:
+            if (
+                percent_width < const.MINIMUM_FACE_WIDTH_PERCENT
+                or percent_height < const.MINIMUM_FACE_HEIGHT_PERCENT
+            ):
+                self.critical_error(
+                    errors.FACE_TOO_SMALL.format(
+                        percent_width=percent_width * 100,
+                        percent_height=percent_height * 100,
+                        minimum_width=const.MINIMUM_FACE_WIDTH_PERCENT * 100,
+                        minimum_height=const.MINIMUM_FACE_HEIGHT_PERCENT * 100,
+                    )
                 )
-            )
-        # Set lower point somewhere around mouth (below nose, above chin)
+            # Set lower point somewhere around mouth (below nose, above chin)
 
-        self.ui.xValue.setValue(int(round(center_x / self.image.size[0] * 479)))
-        self.ui.yValue.setValue(
-            int(round((center_y + he / 4) / self.image.size[1] * 639))
-        )
+            self.ui.xValue.setValue(int(round(center_x / self.image.size[0] * 479)))
+            self.ui.yValue.setValue(
+                int(round((center_y + he / 4) / self.image.size[1] * 639))
+            )
 
         self.redrawImage()
 
