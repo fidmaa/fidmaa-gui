@@ -170,7 +170,12 @@ class ZoomWindow(UILoaderMixin, QWidget):
         font = painter.font()
         font.setPixelSize(32)
         painter.setFont(font)
-        painter.drawText(QPoint(50, 50), str(depthmap.getpixel((240, 160))[0]))
+        value = depthmap.getpixel((240, 160))[0]
+        if value < 100:
+            painter.setPen(QColor(255, 0, 0, 255))
+        else:
+            painter.setPen(QColor(0, 255, 0, 255))
+        painter.drawText(QPoint(50, 50), str(value))
 
         painter.end()
         self.ui.zoomedDepthMapLabel.setPixmap(canvas)
