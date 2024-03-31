@@ -510,13 +510,24 @@ class MainWindow(UILoaderMixin, QWidget):
             {vector_length_3d / 10.0:.2f} cm
 
             Vector length (3D) on surface:
-            {(surface_length_3d / 10.0):.2f} cm
-            """
+            {(surface_length_3d / 10.0):.2f} cm"""
             )
 
             if self.portrait.teeth_bbox:
-                txt += "\nAutomatic incisor distance:\n"
+                txt += "\n\nAutomatic incisor distance:\n"
                 txt += "%.2f cm" % (self.vector_length_simple(*teethbox_args) / 10.0)
+
+            if (
+                closeness_delta_mm is not None
+                and vector_length_3d is not None
+                and vector_length_3d > 0.0
+            ):
+                try:
+                    txt += "\n\nAngle for last 2 clicks:\n%.2f°" % math.degrees(
+                        math.acos(abs(closeness_delta_mm / (vector_length_3d / 10.0)))
+                    )
+                except ValueError:
+                    pass
 
             self.ui.dataOutputEdit.appendPlainText(txt.strip())
 
