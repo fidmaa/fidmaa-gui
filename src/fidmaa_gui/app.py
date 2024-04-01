@@ -2,11 +2,8 @@ import math
 import os
 import sys
 import traceback
-from pathlib import Path
 from textwrap import dedent
-from typing import Optional
 
-import PySide6
 from fidmaa_simple_viewer.core import FIDMAA_to_pyvista_surface
 from PIL import Image, ImageFile, ImageFilter
 from portrait_analyser.exceptions import (
@@ -16,192 +13,28 @@ from portrait_analyser.exceptions import (
     NoFacesDetected,
     UnknownExtension,
 )
-from portrait_analyser.face import get_face_parameters
+from portrait_analyser.face import find_neck_measurement_point, get_face_parameters
 from portrait_analyser.ios import IOSPortrait, load_image
 from PySide6 import QtGui
-from PySide6.QtCore import QFile, QObject, QPoint, QSettings, Qt
+from PySide6.QtCore import QObject, QPoint, QSettings, Qt
 from PySide6.QtGui import QColor
-from PySide6.QtUiTools import QUiLoader
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QWidget
 
 from . import const, errors
 from .calculations import findPoint
-from .QClickableLabel import QClickableLabel
+from .utils import (
+    UILoaderMixin,
+    clamp,
+    get_circumference_of_circle,
+    get_radius_of_circle_described_on_equilateral,
+    interpolate_pixels_along_line,
+    translate_coordinates_to_other_image,
+)
+from .zoomWindow import ZoomWindow
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 tr = QObject.tr
-
-
-class MyQUiLoader(QUiLoader):
-    def createWidget(
-        self,
-        className: str,
-        parent: Optional[PySide6.QtWidgets.QWidget] = ...,
-        name: str = ...,
-    ) -> PySide6.QtWidgets.QWidget:
-        if className == "QClickableLabel":
-            return QClickableLabel(parent=parent)
-        return super(MyQUiLoader, self).createWidget(className, parent, name)
-
-
-def CV2_to_QImage(cv2_image):
-    return QtGui.QImage(
-        cv2_image.data,
-        cv2_image.shape[1],
-        cv2_image.shape[0],
-        QtGui.QImage.Format_RGB888,
-    ).rgbSwapped()
-
-
-def interpolate_pixels_along_line(x1, y1, z1, x2, y2, z2):
-    dist_x = x2 - x1
-    dist_y = y2 - y1
-    dist_z = z2 - z1
-
-    # line_len = math.sqrt(dist_x**2 + dist_y**2 + dist_z**2)
-
-    abs_dist_x = abs(dist_x)
-    abs_dist_y = abs(dist_y)
-    abs_dist_z = abs(dist_z)
-
-    if abs_dist_x >= abs_dist_y and abs_dist_x >= abs_dist_z:
-        no_steps = abs_dist_x
-    elif abs_dist_y >= abs_dist_x and abs_dist_y >= abs_dist_z:
-        no_steps = abs_dist_y
-    elif abs_dist_z >= abs_dist_x and abs_dist_z >= abs_dist_y:
-        no_steps = abs_dist_z
-    else:
-        raise NotImplementedError(dist_x, dist_y, dist_z)
-
-    if no_steps == 0:
-        return
-
-    delta_x = dist_x / no_steps
-    delta_y = dist_y / no_steps
-    delta_z = dist_z / no_steps
-
-    for a in range(no_steps + 1):
-        yield (x1, y1, z1)
-        x1 += delta_x
-        y1 += delta_y
-        z1 += delta_z
-
-
-def clamp(n, minn, maxn):
-    return max(min(maxn - 1, n), minn)
-
-
-class UILoaderMixin:
-    def load_ui(self):
-        loader = MyQUiLoader(self)
-
-        if hasattr(sys, "_MEIPASS"):
-            path = os.path.join(sys._MEIPASS, self.uifile_name)
-        else:
-            path = Path(__file__).resolve().parent / self.uifile_name
-
-        ui_file = QFile(path)
-        ui_file.open(QFile.ReadOnly)
-        self.ui = loader.load(ui_file, self)
-        ui_file.close()
-
-        self.ui.show()
-        self.connect_ui()
-
-    def connect_ui(self):
-        pass
-
-
-class ZoomWindow(UILoaderMixin, QWidget):
-    uifile_name = "zoom_window.ui"
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.load_ui()
-
-    def connect_ui(self):
-        canvas = QtGui.QPixmap(480, 320)
-        self.ui.zoomedImageLabel.setPixmap(canvas)
-
-        canvas = QtGui.QPixmap(480, 320)
-        self.ui.zoomedDepthMapLabel.setPixmap(canvas)
-
-        canvas = QtGui.QPixmap(480, 256)
-        self.ui.reconstructionLabel.setPixmap(canvas)
-
-    def paintZoomedImage(self, zoomed):
-        canvas = self.ui.zoomedImageLabel.pixmap()
-        painter = QtGui.QPainter(canvas)
-        canvas.fill(Qt.green)
-        painter.drawImage(0, 0, zoomed.toqimage())
-
-        painter.setPen(QColor(255, 0, 0, 255))
-
-        painter.drawLine(
-            QPoint(
-                240,
-                0,
-            ),
-            QPoint(240, 320),
-        )
-        painter.drawLine(QPoint(0, 160), QPoint(480, 160))
-
-        painter.end()
-        self.ui.zoomedImageLabel.setPixmap(canvas)
-
-    def paintZoomedDepthmap(self, depthmap):
-        canvas = self.ui.zoomedDepthMapLabel.pixmap()
-        painter = QtGui.QPainter(canvas)
-        canvas.fill(Qt.yellow)
-        painter.drawImage(0, 0, depthmap.toqimage())
-
-        painter.setPen(QColor(255, 0, 0, 255))
-
-        painter.drawLine(
-            QPoint(
-                240,
-                0,
-            ),
-            QPoint(240, 320),
-        )
-        painter.drawLine(QPoint(0, 160), QPoint(480, 160))
-
-        font = painter.font()
-        font.setPixelSize(32)
-        painter.setFont(font)
-        value = depthmap.getpixel((240, 160))[0]
-        if value < 100:
-            painter.setPen(QColor(255, 0, 0, 255))
-        else:
-            painter.setPen(QColor(0, 255, 0, 255))
-        painter.drawText(QPoint(50, 50), str(value))
-
-        painter.end()
-        self.ui.zoomedDepthMapLabel.setPixmap(canvas)
-
-    def paintReconstruction(self, values):
-        canvas = self.ui.reconstructionLabel.pixmap()
-        painter = QtGui.QPainter(canvas)
-        canvas.fill(Qt.yellow)
-        painter.setPen(QColor(0, 0, 0, 255))
-
-        # values_min = min(values)
-        # values_max = max(values)
-
-        for a in range(480):
-            v = values[int(a * len(values) / 480.0)]
-            # v = 256 * ((v - values_min) / (values_max))
-            painter.drawLine(
-                QPoint(
-                    a,
-                    256,
-                ),
-                QPoint(a, 256 - v),
-            )
-
-        painter.end()
-        self.ui.reconstructionLabel.setPixmap(canvas)
 
 
 class MainWindow(UILoaderMixin, QWidget):
@@ -264,10 +97,10 @@ class MainWindow(UILoaderMixin, QWidget):
                 big_image_y = mouse_y * self.image.size[1] / 640
                 zoomed = self.image.crop(
                     (
-                        big_image_x - 120,
-                        big_image_y - 80,
-                        big_image_x + 120,
-                        big_image_y + 80,
+                        big_image_x - 480,
+                        big_image_y - 320,
+                        big_image_x + 480,
+                        big_image_y + 320,
                     )
                 ).resize((480, 320))
 
@@ -275,19 +108,63 @@ class MainWindow(UILoaderMixin, QWidget):
                     zoomed,
                 )
 
+            if self.portrait and self.portrait.skinmap:
+                skinmap_x, skinmap_y = translate_coordinates_to_other_image(
+                    (mouse_x, mouse_y), (480, 640), (self.portrait.skinmap.size)
+                )
+
+                zoomed = self.portrait.skinmap.crop(
+                    (
+                        skinmap_x - 480,
+                        skinmap_y - 320,
+                        skinmap_x + 480,
+                        skinmap_y + 320,
+                    )
+                ).resize((480, 320))
+
+                self.zoomWindow.paintZoomedSkinmap(
+                    zoomed, mouse_x=skinmap_x, mouse_y=skinmap_y
+                )
+
+            if self.portrait and self.portrait.teethmap:
+                teethmap_x, teethmap_y = translate_coordinates_to_other_image(
+                    (mouse_x, mouse_y), (480, 640), (self.portrait.teethmap.size)
+                )
+
+                zoomed = self.portrait.teethmap.crop(
+                    (
+                        teethmap_x - 480,
+                        teethmap_y - 320,
+                        teethmap_x + 480,
+                        teethmap_y + 320,
+                    )
+                ).resize((480, 320))
+
+                self.zoomWindow.paintZoomedTeethmap(
+                    zoomed, mouse_x=teethmap_x, mouse_y=teethmap_y
+                )
+
             if self.depthmap:
                 zoomed = (
                     self.depthmap.crop(
-                        (mouse_x - 144, mouse_y - 96, mouse_x + 144, mouse_y + 96)
+                        (mouse_x - 96, mouse_y - 64, mouse_x + 96, mouse_y + 64)
                     )
                     .resize((480, 320), Image.HAMMING)
                     .filter(ImageFilter.SHARPEN)
                     .filter(ImageFilter.SHARPEN)
                     .filter(ImageFilter.SHARPEN)
                 )
-                self.zoomWindow.paintZoomedDepthmap(zoomed)
+
+                self.zoomWindow.paintZoomedDepthmap(
+                    zoomed,
+                    mouse_x=mouse_x,
+                    mouse_y=mouse_y,
+                )
 
     def redrawImage(self, *args, **kw):
+        if not self.portrait:
+            return
+
         mouse_x = x = self.ui.xValue.value()
         y = mouse_y = self.ui.yValue.value()
         angle = self.ui.angleValue.value()
@@ -313,6 +190,10 @@ class MainWindow(UILoaderMixin, QWidget):
         if self.smallImage:
             painter.drawImage(0, 0, self.smallImage.toqimage())
 
+        # if self.portrait:
+        #     painter.drawImage(0, 0, self.portrait.skinmap.resize((480, 640)).toqimage())
+        #     )  # smallImage.toqimage())
+
         # if self.teethmap:
         #     ni = self.teethmap.resize((480, 640)).filter(
         #         ImageFilter.MedianFilter(size=3)
@@ -325,6 +206,57 @@ class MainWindow(UILoaderMixin, QWidget):
                 tx, ty, twi, the = self.portrait.teeth_bbox_translated(480, 640)
                 painter.setPen(QColor(255, 255, 0, 127))
                 painter.drawRect(tx, ty, twi, the)
+
+                if self.portrait.incisor_distance:
+                    auto_id_click_1 = translate_coordinates_to_other_image(
+                        (
+                            self.portrait.incisor_distance[0],
+                            self.portrait.incisor_distance[1],
+                        ),
+                        self.portrait.teethmap.size,
+                        (480, 640),
+                    )
+                    auto_id_click_2 = translate_coordinates_to_other_image(
+                        (
+                            self.portrait.incisor_distance[2],
+                            self.portrait.incisor_distance[3],
+                        ),
+                        self.portrait.teethmap.size,
+                        (480, 640),
+                    )
+                    painter.drawLine(QPoint(*auto_id_click_1), QPoint(*auto_id_click_2))
+
+        if self.neck_measurement:
+            neck_click_1 = translate_coordinates_to_other_image(
+                (
+                    self.neck_measurement[0],
+                    self.neck_measurement[1],
+                ),
+                self.portrait.skinmap.size,
+                (480, 640),
+            )
+            while self.get_depthmap_value(*neck_click_1) < 110:
+                neck_click_1 = (neck_click_1[0] + 1, neck_click_1[1])
+                if neck_click_1[0] > 480:
+                    neck_click_1 = None
+                    break
+
+            neck_click_2 = translate_coordinates_to_other_image(
+                (
+                    self.neck_measurement[2],
+                    self.neck_measurement[3],
+                ),
+                self.portrait.skinmap.size,
+                (480, 640),
+            )
+            while self.get_depthmap_value(*neck_click_2) < 110:
+                neck_click_2 = (neck_click_2[0] - 1, neck_click_2[1])
+                if neck_click_2[0] < 0:
+                    neck_click_2 = None
+                    break
+
+            if neck_click_2 is not None and neck_click_1 is not None:
+                painter.drawLine(QPoint(*neck_click_1), QPoint(*neck_click_2))
 
         if self.face:
             painter.setPen(QColor(0, 0, 255, 127))
@@ -349,39 +281,6 @@ class MainWindow(UILoaderMixin, QWidget):
             painter.drawLine(
                 QPoint(mouse_x, mouse_y), QPoint(self.last_click_x, self.last_click_y)
             )
-
-        if self.portrait and self.portrait.teeth_bbox:
-            smx, smy, smwi, smhe = self.portrait.teeth_bbox_translated(480, 640)
-            smy += 3
-            smhe -= 6
-
-            z1 = self.get_depthmap_value(smx + smwi / 2, smy)
-            z2 = self.get_depthmap_value(smx + smwi / 2, smy + smhe)
-
-            distance_z1 = self.get_depthmap_distance(z1)
-            distance_z2 = self.get_depthmap_distance(z2)
-
-            distance_x1, distance_y1 = self.translate_click_to_mm(
-                distance_z1, smx + smwi / 2, smy
-            )
-
-            distance_x2, distance_y2 = self.translate_click_to_mm(
-                distance_z2,
-                smx + smwi / 2,
-                smy + smhe,
-            )
-
-            teethbox_args = (
-                distance_x1,
-                distance_y1,
-                distance_z1,
-                distance_x2,
-                distance_y2,
-                distance_z2,
-            )
-            # print("Teethbox", args)
-            painter.setPen(QColor(255, 255, 0, 255))
-            painter.drawLine(smx + smwi / 2, smy, smx + smwi / 2, smhe + smy)
 
         painter.end()
         self.ui.imageLabel.setPixmap(canvas)
@@ -441,35 +340,13 @@ class MainWindow(UILoaderMixin, QWidget):
                 line_y = abs(self.last_click_y - mouse_y)
                 line_len = self.calculate_line_length(line_x, line_y)
 
-            surface_length_3d = vector_len_voxels = vector_length_3d = 0
+            surface_length_3d = vector_length_3d = 0
             if (
                 self.last_click_x != mouse_x or self.last_click_y != mouse_y
             ) and self.last_click_x is not None:
-                z1 = self.get_depthmap_value(mouse_x, mouse_y)
-                z2 = self.get_depthmap_value(self.last_click_x, self.last_click_y)
-
-                vector_len_voxels = self.vector_length_simple(
-                    mouse_x, mouse_y, z1, self.last_click_x, self.last_click_y, z2
+                vector_length_3d = self.vector_length_between_two_clicks(
+                    mouse_x, mouse_y, self.last_click_x, self.last_click_y
                 )
-
-                distance_z1 = self.get_depthmap_distance(z1)
-                distance_z2 = self.get_depthmap_distance(z2)
-
-                distance_x1, distance_y1 = self.translate_click_to_mm(
-                    distance_z1, mouse_x, mouse_y
-                )
-                distance_x2, distance_y2 = self.translate_click_to_mm(
-                    distance_z2, self.last_click_x, self.last_click_y
-                )
-                args = (
-                    distance_x1,
-                    distance_y1,
-                    distance_z1,
-                    distance_x2,
-                    distance_y2,
-                    distance_z2,
-                )
-                vector_length_3d = self.vector_length_simple(*args)
 
                 surface_length_3d = self.vector_length_surface(
                     mouse_x, mouse_y, self.last_click_x, self.last_click_y
@@ -496,20 +373,15 @@ class MainWindow(UILoaderMixin, QWidget):
             self.ui.dataOutputEdit.clear()
             txt = dedent(
                 f"""
-            Depth map coords:
-            {mouse_x, mouse_y}
+            Depth map coords: {mouse_x, mouse_y}
 
-            Depth map raw data:
-            {closeness} (Δ: {closeness_delta})
+            Depth map raw data: {closeness} (Δ: {closeness_delta})
 
             Depth map distance:
             {depth_mm:.2f} cm (Δ: {closeness_delta_mm:.1f} cm)
 
             Line length (2D, on flat picture):
             {line_len:.2f} pixels
-
-            Vector length (3D) simple - on raw data:
-            {vector_len_voxels:.2f} voxels
 
             Vector length (3D) with depth:
             {vector_length_3d / 10.0:.2f} cm
@@ -518,9 +390,28 @@ class MainWindow(UILoaderMixin, QWidget):
             {(surface_length_3d / 10.0):.2f} cm"""
             )
 
-            if self.portrait.teeth_bbox:
-                txt += "\n\nAutomatic incisor distance:\n"
-                txt += "%.2f cm" % (self.vector_length_simple(*teethbox_args) / 10.0)
+            if self.portrait.teeth_bbox and self.portrait.teeth_bbox:
+                txt += "\n\nTeeth detected. Automatic incisor distance:\n"
+                txt += "%.2f cm" % (
+                    self.vector_length_between_two_clicks(
+                        *auto_id_click_1, *auto_id_click_2
+                    )
+                    / 10.0
+                )
+
+            if self.neck_measurement:
+                if neck_click_2 is not None and neck_click_1 is not None:
+                    txt += "\n\nFace detected, neck probably analysed. Automatic neck circumference:\n"
+                    txt += "%.2f cm" % (
+                        get_circumference_of_circle(
+                            get_radius_of_circle_described_on_equilateral(
+                                self.vector_length_between_two_clicks(
+                                    *neck_click_1, *neck_click_2
+                                )
+                                / 10.0
+                            )
+                        )
+                    )
 
             if (
                 closeness_delta_mm is not None
@@ -534,10 +425,23 @@ class MainWindow(UILoaderMixin, QWidget):
                 except ValueError:
                     pass
 
+                txt += "\n\nNeck circumference for last 2 clicks: %.2f" % (
+                    get_circumference_of_circle(
+                        get_radius_of_circle_described_on_equilateral(vector_length_3d)
+                    )
+                    / 10.0
+                )
+            # Portrait picture
+
+            # Try neck measurement
+
             self.ui.dataOutputEdit.appendPlainText(txt.strip())
 
     def get_depthmap_value(self, x, y):
         return self.depthmap.getpixel((x, y))[0]
+
+    def distance_for_click(self, x, y):
+        return self.get_depthmap_distance(self.get_depthmap_value(x, y))
 
     def translate_click_to_mm(
         self, distance_cm, x, y, SMALL_WIDTH=480, SMALL_HEIGHT=640
@@ -550,6 +454,11 @@ class MainWindow(UILoaderMixin, QWidget):
                 distance_cm, y * self.image.size[1] / SMALL_HEIGHT
             ),
         )
+
+    def click_to_3d(self, x, y):
+        z = self.distance_for_click(x, y)
+        x, y = self.translate_click_to_mm(z, x, y)
+        return x, y, z
 
     def vector_length_surface(
         self,
@@ -570,10 +479,10 @@ class MainWindow(UILoaderMixin, QWidget):
         s = []
 
         for (x1, y1, z1), (x2, y2, z2) in zip(pixels, pixels[1:]):
-            z1 = self.get_depthmap_distance(self.get_depthmap_value(x1, y1))
+            z1 = self.distance_for_click(x1, y1)
             x1, y1 = self.translate_click_to_mm(z1, x1, y1)
 
-            z2 = self.get_depthmap_distance(self.get_depthmap_value(x2, y2))
+            z2 = self.distance_for_click(x2, y2)
             x2, y2 = self.translate_click_to_mm(z2, x2, y2)
 
             line_len_3d = self.vector_length_simple(x1, y1, z1, x2, y2, z2)
@@ -583,6 +492,33 @@ class MainWindow(UILoaderMixin, QWidget):
     def vector_length_simple(self, x1, y1, z1, x2, y2, z2):
         """Simple mathematical lenght of the vector"""
         return math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2 + (z2 - z1) ** 2)
+
+    def vector_length_between_two_clicks(self, x1, y1, x2, y2):
+        z1 = self.get_depthmap_value(x1, y1)
+        z2 = self.get_depthmap_value(x2, y2)
+
+        distance_z1 = self.get_depthmap_distance(z1)
+        distance_z2 = self.get_depthmap_distance(z2)
+
+        distance_x1, distance_y1 = self.translate_click_to_mm(
+            distance_z1,
+            x1,
+            y1,
+        )
+        distance_x2, distance_y2 = self.translate_click_to_mm(
+            distance_z2,
+            x2,
+            y2,
+        )
+        args = (
+            distance_x1,
+            distance_y1,
+            distance_z1,
+            distance_x2,
+            distance_y2,
+            distance_z2,
+        )
+        return self.vector_length_simple(*args)
 
     def calculate_line_length(self, dist_x, dist_y):
         line_len = math.sqrt(abs(dist_x * dist_x) + abs(dist_y * dist_y))
@@ -661,6 +597,7 @@ class MainWindow(UILoaderMixin, QWidget):
         # Get face position, if any:
         #
 
+        self.neck_measurement = None
         try:
             self.face = get_face_parameters(self.image, raise_opencv_exceptions=True)
         except NoFacesDetected:
@@ -705,7 +642,13 @@ class MainWindow(UILoaderMixin, QWidget):
                 )
             )
 
-        self.last_click_x = None
+            if self.portrait.skinmap and self.face:
+                self.neck_measurement = find_neck_measurement_point(
+                    self.portrait.skinmap, self.face
+                )
+
+        self.last_click_y = self.last_click_x = None
+        self.last_clicks = []
         self.redrawImage()
         self.updateWindowTitle()
 
