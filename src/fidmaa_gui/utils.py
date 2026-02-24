@@ -112,5 +112,9 @@ def get_radius_of_circle_described_on_equilateral(length):
     return 2 / 3 * get_height_of_equilateral_triangle(length)
 
 
+def get_radius_of_circle_described_on_square(length):
+    return length * math.sqrt(2) / 2
+
+
 def get_circumference_of_circle(radius):
     return radius * math.pi * 2

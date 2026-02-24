@@ -8,28 +8,28 @@ jobs:
   build:
     runs-on: macos-12
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
 
-      - name: Setup path
-        run: echo "$HOME/.local/bin" >> $GITHUB_PATH
-        
-      - name: Install Poetry
-        run: curl -sSL https://install.python-poetry.org | python3 -
-        
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
       - name: Install deps
-        run: poetry install --no-root
-        
+        run: uv sync
+
+      - name: Run tests
+        run: uv run pytest
+
       - name: Run PyInstaller
-        run: poetry run pyinstaller --windowed  --add-data "src/fidmaa_gui/form.ui:." src/entrypoints.py
+        run: uv run pyinstaller fidmaa_gui.spec
 
       - name: Copy files
         run: make macos-copy-files
 
       - name: Build ZIP
         run: make zip-app
-        
+
       - name: Archive production artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: application.app.zip
-          path: dist/application.app.zip
+          name: fidmaa_gui.app.zip
+          path: dist/fidmaa_gui.app.zip

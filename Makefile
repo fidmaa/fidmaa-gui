@@ -13,14 +13,14 @@ clean:
 macos: macos-build macos-copy-files
 
 macos-build:
-	pyinstaller --windowed  --add-data "src/fidmaa/form.ui:." src/application.py
+	pyinstaller fidmaa_gui.spec
 
-VENV_PATH=`poetry env info --path`
+VENV_PATH=$(shell python -c "import sys; print(sys.prefix)")
 
 macos-copy-files:
-	cp -R $(VENV_PATH)/lib/python3*/site-packages/cv2/data/ ./dist/application.app/Contents/MacOS/cv2/data/
-	mkdir -p dist/application.app/Contents/MacOS/pyheif/data/
-	cp -R $(VENV_PATH)/lib/python3*/site-packages/pyheif/data/ ./dist/application.app/Contents/MacOS/pyheif/data/
+	cp -R $(VENV_PATH)/lib/python3*/site-packages/cv2/data/ ./dist/fidmaa_gui.app/Contents/MacOS/cv2/data/
+	mkdir -p dist/fidmaa_gui.app/Contents/MacOS/pyheif/data/
+	cp -R $(VENV_PATH)/lib/python3*/site-packages/pyheif/data/ ./dist/fidmaa_gui.app/Contents/MacOS/pyheif/data/
 
 zip-app:
-	cd dist && zip -r application.app.zip application.app	
+	cd dist && zip -r fidmaa_gui.app.zip fidmaa_gui.app
