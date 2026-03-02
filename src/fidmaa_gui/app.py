@@ -12,12 +12,28 @@ from portrait_analyser.exceptions import (
     NoFacesDetected,
     UnknownExtension,
 )
-from portrait_analyser.face import find_neck_measurement_point, get_face_parameters
+from portrait_analyser.face import (
+    detect_eyes,
+    get_face_parameters,
+    translate_coordinates,
+)
 from portrait_analyser.ios import IOSPortrait, load_image
+from portrait_analyser.neck import compute_neck_circumference
+from portrait_analyser.pose import MediaPipeDebug, detect_neck_midpoint
 from PySide6 import QtGui
 from PySide6.QtCore import QObject, QPoint, QSettings, Qt
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
 from . import const, errors
 from .calculations import findPoint
@@ -30,7 +46,6 @@ from .utils import (
     interpolate_pixels_along_line,
     translate_coordinates_to_other_image,
 )
-from .zoomWindow import ZoomWindow
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
@@ -44,15 +59,17 @@ def _show_3d_view(image, depthmap, float_min, float_max):
     pyvista_show(image, depthmap, float_min, float_max)
 
 
-class MainWindow(UILoaderMixin, QWidget):
+class MainWindow(UILoaderMixin, QMainWindow):
     uifile_name = "form.ui"
 
-    def __init__(self, parent=None, zoomWindow=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
         self.load_ui()
+        self._create_zoom_panel()
 
         self.filename = None
         self.face = None
+        self.standalone_eyes = []
 
         self.smallImage = None
         self.portrait: IOSPortrait = None
@@ -61,12 +78,13 @@ class MainWindow(UILoaderMixin, QWidget):
 
         self.float_max_value = self.float_min_value = None
 
-        self.zoomWindow = zoomWindow
-
         self.last_click_x = None
         self.last_click_y = None
         self.last_angle = None
         self.last_depth = None
+        self.last_show_centroids = None
+        self.last_show_neck_arc = None
+        self.last_show_landmarks = None
         self.face = None
 
         self.last_5_distances_vect = []
@@ -74,6 +92,329 @@ class MainWindow(UILoaderMixin, QWidget):
 
         self.redrawImage()
         self.redrawZoom()
+
+    def _create_zoom_panel(self):
+        # Take the UI widget out of central and wrap it with a zoom panel below
+        ui_widget = self.centralWidget()
+        wrapper = QWidget()
+        wrapper_layout = QVBoxLayout(wrapper)
+        wrapper_layout.setContentsMargins(0, 0, 0, 0)
+        wrapper_layout.setSpacing(0)
+        wrapper_layout.addWidget(ui_widget)
+
+        # Create the bottom zoom panel with 2 rows of always-visible labels
+        zoom_panel = QWidget()
+        zoom_panel.setFixedHeight(400)
+        zoom_panel_layout = QVBoxLayout(zoom_panel)
+        zoom_panel_layout.setContentsMargins(2, 2, 2, 2)
+        zoom_panel_layout.setSpacing(2)
+
+        # Row 1: depth map, teeth map, reconstruction
+        row1 = QHBoxLayout()
+        row1.setSpacing(2)
+
+        self.zoomedDepthMapLabel = QLabel("Depth Map")
+        self.zoomedDepthMapLabel.setSizePolicy(
+            QSizePolicy.Ignored, QSizePolicy.Ignored
+        )
+        self.zoomedDepthMapLabel.setStyleSheet("border:1px solid;")
+        row1.addWidget(self.zoomedDepthMapLabel, stretch=1)
+
+        self.zoomedTeethMapLabel = QLabel("Teeth Map")
+        self.zoomedTeethMapLabel.setSizePolicy(
+            QSizePolicy.Ignored, QSizePolicy.Ignored
+        )
+        self.zoomedTeethMapLabel.setStyleSheet("border:1px solid;")
+        row1.addWidget(self.zoomedTeethMapLabel, stretch=1)
+
+        self.reconstructionLabel = QLabel("Reconstruction")
+        self.reconstructionLabel.setSizePolicy(
+            QSizePolicy.Ignored, QSizePolicy.Ignored
+        )
+        self.reconstructionLabel.setStyleSheet("border:1px solid;")
+        row1.addWidget(self.reconstructionLabel, stretch=1)
+
+        zoom_panel_layout.addLayout(row1)
+
+        # Row 2: photo, skin matte
+        row2 = QHBoxLayout()
+        row2.setSpacing(2)
+
+        self.zoomedImageLabel = QLabel("Photo")
+        self.zoomedImageLabel.setSizePolicy(
+            QSizePolicy.Ignored, QSizePolicy.Ignored
+        )
+        self.zoomedImageLabel.setStyleSheet("border:1px solid;")
+        row2.addWidget(self.zoomedImageLabel, stretch=1)
+
+        self.zoomedSkinMapLabel = QLabel("Skin Matte")
+        self.zoomedSkinMapLabel.setSizePolicy(
+            QSizePolicy.Ignored, QSizePolicy.Ignored
+        )
+        self.zoomedSkinMapLabel.setStyleSheet("border:1px solid;")
+        row2.addWidget(self.zoomedSkinMapLabel, stretch=1)
+
+        self.zoomedHairMapLabel = QLabel("Hair Matte")
+        self.zoomedHairMapLabel.setSizePolicy(
+            QSizePolicy.Ignored, QSizePolicy.Ignored
+        )
+        self.zoomedHairMapLabel.setStyleSheet("border:1px solid;")
+        row2.addWidget(self.zoomedHairMapLabel, stretch=1)
+
+        zoom_panel_layout.addLayout(row2)
+
+        wrapper_layout.addWidget(zoom_panel)
+        self.setCentralWidget(wrapper)
+
+    # ------------------------------------------------------------------
+    # Zoom painting methods (moved from ZoomWindow)
+    # ------------------------------------------------------------------
+
+    def _paintZoomedMap(
+        self,
+        label_text,
+        image_map,
+        ui_element,
+        mouse_x=None,
+        mouse_y=None,
+        ok_value_threshold=100,
+    ):
+        w = ui_element.width()
+        h = ui_element.height()
+        if w < 1 or h < 1:
+            return
+
+        qimg = image_map.toqimage().scaled(w, h, Qt.IgnoreAspectRatio)
+        canvas = QtGui.QPixmap(w, h)
+        painter = QtGui.QPainter(canvas)
+        try:
+            painter.drawImage(0, 0, qimg)
+
+            painter.setPen(QColor(255, 0, 0, 255))
+            half_w = w // 2
+            half_h = h // 2
+            painter.drawLine(QPoint(half_w, 0), QPoint(half_w, h))
+            painter.drawLine(QPoint(0, half_h), QPoint(w, half_h))
+
+            font = painter.font()
+            font.setPixelSize(max(16, h // 10))
+            painter.setFont(font)
+            try:
+                value = image_map.getpixel((half_w, half_h))[0]
+            except TypeError:
+                value = image_map.getpixel((half_w, half_h))
+
+            if value < ok_value_threshold:
+                painter.setPen(QColor(255, 0, 0, 255))
+            else:
+                painter.setPen(QColor(0, 255, 0, 255))
+            painter.drawText(QPoint(50, 50), str(label_text))
+            painter.drawText(QPoint(50, 100), str(value))
+            if mouse_x is not None and mouse_y is not None:
+                painter.drawText(
+                    QPoint(50, 150), str(int(mouse_x)) + " x " + str(int(mouse_y))
+                )
+        finally:
+            painter.end()
+        ui_element.setPixmap(canvas)
+
+    def paintZoomedDepthmap(self, depthmap, mouse_x=None, mouse_y=None):
+        self._paintZoomedMap(
+            "Depth map", depthmap, self.zoomedDepthMapLabel, mouse_x, mouse_y
+        )
+
+    def paintZoomedImage(self, zoomed):
+        w = self.zoomedImageLabel.width()
+        h = self.zoomedImageLabel.height()
+        if w < 1 or h < 1:
+            return
+
+        qimg = zoomed.toqimage().scaled(w, h, Qt.KeepAspectRatio)
+        canvas = QtGui.QPixmap(w, h)
+        canvas.fill(Qt.black)
+        painter = QtGui.QPainter(canvas)
+        try:
+            offset_x = (w - qimg.width()) // 2
+            offset_y = (h - qimg.height()) // 2
+            painter.drawImage(offset_x, offset_y, qimg)
+
+            painter.setPen(QColor(255, 0, 0, 255))
+            half_w = w // 2
+            half_h = h // 2
+            painter.drawLine(QPoint(half_w, 0), QPoint(half_w, h))
+            painter.drawLine(QPoint(0, half_h), QPoint(w, half_h))
+        finally:
+            painter.end()
+        self.zoomedImageLabel.setPixmap(canvas)
+
+    def paintZoomedSkinmap(
+        self,
+        skinmap,
+        mouse_x=None,
+        mouse_y=None,
+        neck_arc_points=None,
+        crop_origin=None,
+        crop_size=None,
+    ):
+        w = self.zoomedSkinMapLabel.width()
+        h = self.zoomedSkinMapLabel.height()
+        if w < 1 or h < 1:
+            return
+
+        qimg = skinmap.toqimage().scaled(w, h, Qt.KeepAspectRatio)
+        canvas = QtGui.QPixmap(w, h)
+        canvas.fill(Qt.black)
+        painter = QtGui.QPainter(canvas)
+        try:
+            offset_x = (w - qimg.width()) // 2
+            offset_y = (h - qimg.height()) // 2
+            painter.drawImage(offset_x, offset_y, qimg)
+
+            painter.setPen(QColor(255, 0, 0, 255))
+            half_w = w // 2
+            half_h = h // 2
+            painter.drawLine(QPoint(half_w, 0), QPoint(half_w, h))
+            painter.drawLine(QPoint(0, half_h), QPoint(w, half_h))
+
+            font = painter.font()
+            font.setPixelSize(max(16, h // 10))
+            painter.setFont(font)
+            painter.setPen(QColor(0, 255, 0, 255))
+            painter.drawText(QPoint(50, 50), "Skin matte")
+            if mouse_x is not None and mouse_y is not None:
+                painter.drawText(
+                    QPoint(50, 100), str(int(mouse_x)) + " x " + str(int(mouse_y))
+                )
+
+            if neck_arc_points and crop_origin and crop_size:
+                arc_color = QColor(255, 165, 0, 200)
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(arc_color)
+                display_pts = []
+                for px, py in neck_arc_points:
+                    local_x = px - crop_origin[0]
+                    local_y = py - crop_origin[1]
+                    display_x = offset_x + local_x * qimg.width() / crop_size[0]
+                    display_y = offset_y + local_y * qimg.height() / crop_size[1]
+                    if 0 <= display_x <= w and 0 <= display_y <= h:
+                        pt = QPoint(int(display_x), int(display_y))
+                        display_pts.append(pt)
+                        painter.drawEllipse(pt, 3, 3)
+                painter.setBrush(Qt.NoBrush)
+                pen = QtGui.QPen(arc_color, 2)
+                painter.setPen(pen)
+                for i in range(1, len(display_pts)):
+                    painter.drawLine(display_pts[i - 1], display_pts[i])
+        finally:
+            painter.end()
+        self.zoomedSkinMapLabel.setPixmap(canvas)
+
+    def paintZoomedHairmap(self, hairmap, mouse_x=None, mouse_y=None):
+        w = self.zoomedHairMapLabel.width()
+        h = self.zoomedHairMapLabel.height()
+        if w < 1 or h < 1:
+            return
+
+        qimg = hairmap.toqimage().scaled(w, h, Qt.KeepAspectRatio)
+        canvas = QtGui.QPixmap(w, h)
+        canvas.fill(Qt.black)
+        painter = QtGui.QPainter(canvas)
+        try:
+            offset_x = (w - qimg.width()) // 2
+            offset_y = (h - qimg.height()) // 2
+            painter.drawImage(offset_x, offset_y, qimg)
+
+            painter.setPen(QColor(255, 0, 0, 255))
+            half_w = w // 2
+            half_h = h // 2
+            painter.drawLine(QPoint(half_w, 0), QPoint(half_w, h))
+            painter.drawLine(QPoint(0, half_h), QPoint(w, half_h))
+
+            font = painter.font()
+            font.setPixelSize(max(16, h // 10))
+            painter.setFont(font)
+            painter.setPen(QColor(0, 255, 0, 255))
+            painter.drawText(QPoint(50, 50), "Hair matte")
+            if mouse_x is not None and mouse_y is not None:
+                painter.drawText(
+                    QPoint(50, 100), str(int(mouse_x)) + " x " + str(int(mouse_y))
+                )
+        finally:
+            painter.end()
+        self.zoomedHairMapLabel.setPixmap(canvas)
+
+    def paintZoomedTeethmap(
+        self,
+        teethmap,
+        mouse_x=None,
+        mouse_y=None,
+        centroids=None,
+        crop_origin=None,
+        crop_size=None,
+    ):
+        w = self.zoomedTeethMapLabel.width()
+        h = self.zoomedTeethMapLabel.height()
+        if w < 1 or h < 1:
+            return
+
+        self._paintZoomedMap(
+            "Teeth map",
+            teethmap,
+            self.zoomedTeethMapLabel,
+            mouse_x,
+            mouse_y,
+            ok_value_threshold=200,
+        )
+
+        if centroids is None or crop_origin is None or crop_size is None:
+            return
+
+        canvas = self.zoomedTeethMapLabel.pixmap()
+        painter = QtGui.QPainter(canvas)
+        try:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(0, 255, 255, 200))
+            for centroid in (centroids.upper_centroid, centroids.lower_centroid):
+                if centroid is None:
+                    continue
+                local_x = centroid[0] - crop_origin[0]
+                local_y = centroid[1] - crop_origin[1]
+                display_x = local_x * w / crop_size[0]
+                display_y = local_y * h / crop_size[1]
+                if 0 <= display_x <= w and 0 <= display_y <= h:
+                    painter.drawEllipse(QPoint(int(display_x), int(display_y)), 5, 5)
+        finally:
+            painter.end()
+        self.zoomedTeethMapLabel.setPixmap(canvas)
+
+    def paintReconstruction(self, values):
+        if not values:
+            return
+
+        w = self.reconstructionLabel.width()
+        h = self.reconstructionLabel.height()
+        if w < 1 or h < 1:
+            return
+
+        canvas = QtGui.QPixmap(w, h)
+        canvas.fill(Qt.yellow)
+        painter = QtGui.QPainter(canvas)
+        try:
+            painter.setPen(QColor(0, 0, 0, 255))
+            for a in range(w):
+                idx = min(int(a * len(values) / float(w)), len(values) - 1)
+                v = values[idx]
+                painter.drawLine(
+                    QPoint(a, h),
+                    QPoint(a, h - v),
+                )
+        finally:
+            painter.end()
+        self.reconstructionLabel.setPixmap(canvas)
+
+    # ------------------------------------------------------------------
+    # Core application logic
+    # ------------------------------------------------------------------
 
     def get_depthmap_distance(self, value):
         """Returns a distance from a given depthMap value in centimeters
@@ -106,75 +447,118 @@ class MainWindow(UILoaderMixin, QWidget):
         zoom_w = const.ZOOM_WIDTH
         zoom_h = const.ZOOM_HEIGHT
 
-        if self.zoomWindow:
-            if self.smallImage:
-                big_image_x = mouse_x * self.image.size[0] / img_w
-                big_image_y = mouse_y * self.image.size[1] / img_h
-                zoomed = self.image.crop(
-                    (
-                        big_image_x - zoom_w,
-                        big_image_y - zoom_h,
-                        big_image_x + zoom_w,
-                        big_image_y + zoom_h,
-                    )
-                ).resize((zoom_w, zoom_h))
+        # Crop radii — 3/4 of full zoom size for moderate zoom
+        crop_w = zoom_w * 3 // 4
+        crop_h = zoom_h * 3 // 4
 
-                self.zoomWindow.paintZoomedImage(
-                    zoomed,
+        if self.smallImage:
+            big_image_x = mouse_x * self.image.size[0] / img_w
+            big_image_y = mouse_y * self.image.size[1] / img_h
+            zoomed = self.image.crop(
+                (
+                    big_image_x - crop_w,
+                    big_image_y - crop_h,
+                    big_image_x + crop_w,
+                    big_image_y + crop_h,
                 )
+            ).resize((zoom_w, zoom_h))
+            self.paintZoomedImage(zoomed)
 
-            if self.portrait and self.portrait.skinmap:
-                skinmap_x, skinmap_y = translate_coordinates_to_other_image(
-                    (mouse_x, mouse_y), (img_w, img_h), (self.portrait.skinmap.size)
+        if self.portrait and self.portrait.skinmap:
+            skinmap_x, skinmap_y = translate_coordinates_to_other_image(
+                (mouse_x, mouse_y), (img_w, img_h), (self.portrait.skinmap.size)
+            )
+            zoomed = self.portrait.skinmap.crop(
+                (
+                    skinmap_x - crop_w,
+                    skinmap_y - crop_h,
+                    skinmap_x + crop_w,
+                    skinmap_y + crop_h,
                 )
+            ).resize((zoom_w, zoom_h))
+            neck_arc_points = None
+            skin_crop_origin = None
+            skin_crop_size = None
+            if (
+                self.ui.showNeckArcCheckBox.isChecked()
+                and self.neck_measurement_auto
+            ):
+                neck_arc_points = self.neck_measurement_auto.arc_points_photo
+                skin_crop_origin = (skinmap_x - crop_w, skinmap_y - crop_h)
+                skin_crop_size = (crop_w * 2, crop_h * 2)
 
-                zoomed = self.portrait.skinmap.crop(
-                    (
-                        skinmap_x - zoom_w,
-                        skinmap_y - zoom_h,
-                        skinmap_x + zoom_w,
-                        skinmap_y + zoom_h,
-                    )
-                ).resize((zoom_w, zoom_h))
+            self.paintZoomedSkinmap(
+                zoomed,
+                mouse_x=skinmap_x,
+                mouse_y=skinmap_y,
+                neck_arc_points=neck_arc_points,
+                crop_origin=skin_crop_origin,
+                crop_size=skin_crop_size,
+            )
 
-                self.zoomWindow.paintZoomedSkinmap(
-                    zoomed, mouse_x=skinmap_x, mouse_y=skinmap_y
+        if self.portrait and self.portrait.hairmap:
+            hairmap_x, hairmap_y = translate_coordinates_to_other_image(
+                (mouse_x, mouse_y), (img_w, img_h), self.portrait.hairmap.size
+            )
+            zoomed = self.portrait.hairmap.crop(
+                (
+                    hairmap_x - crop_w,
+                    hairmap_y - crop_h,
+                    hairmap_x + crop_w,
+                    hairmap_y + crop_h,
                 )
+            ).resize((zoom_w, zoom_h))
+            self.paintZoomedHairmap(zoomed, mouse_x=hairmap_x, mouse_y=hairmap_y)
 
-            if self.portrait and self.portrait.teethmap:
-                teethmap_x, teethmap_y = translate_coordinates_to_other_image(
-                    (mouse_x, mouse_y), (img_w, img_h), (self.portrait.teethmap.size)
+        if self.portrait and self.portrait.teethmap:
+            teethmap_x, teethmap_y = translate_coordinates_to_other_image(
+                (mouse_x, mouse_y), (img_w, img_h), (self.portrait.teethmap.size)
+            )
+
+            zoomed = self.portrait.teethmap.crop(
+                (
+                    teethmap_x - crop_w,
+                    teethmap_y - crop_h,
+                    teethmap_x + crop_w,
+                    teethmap_y + crop_h,
                 )
+            ).resize((zoom_w, zoom_h))
 
-                zoomed = self.portrait.teethmap.crop(
-                    (
-                        teethmap_x - zoom_w,
-                        teethmap_y - zoom_h,
-                        teethmap_x + zoom_w,
-                        teethmap_y + zoom_h,
-                    )
-                ).resize((zoom_w, zoom_h))
+            centroids = None
+            if (
+                self.ui.showCentroidsCheckBox.isChecked()
+                and self.portrait.incisor_measurement
+            ):
+                centroids = self.portrait.incisor_measurement
 
-                self.zoomWindow.paintZoomedTeethmap(
-                    zoomed, mouse_x=teethmap_x, mouse_y=teethmap_y
+            self.paintZoomedTeethmap(
+                zoomed,
+                mouse_x=teethmap_x,
+                mouse_y=teethmap_y,
+                centroids=centroids,
+                crop_origin=(
+                    teethmap_x - crop_w,
+                    teethmap_y - crop_h,
+                ),
+                crop_size=(crop_w * 2, crop_h * 2),
+            )
+
+        if self.depthmap:
+            zoomed = (
+                self.depthmap.crop(
+                    (mouse_x - 72, mouse_y - 48, mouse_x + 72, mouse_y + 48)
                 )
+                .resize((zoom_w, zoom_h), Image.HAMMING)
+                .filter(ImageFilter.SHARPEN)
+                .filter(ImageFilter.SHARPEN)
+                .filter(ImageFilter.SHARPEN)
+            )
 
-            if self.depthmap:
-                zoomed = (
-                    self.depthmap.crop(
-                        (mouse_x - 96, mouse_y - 64, mouse_x + 96, mouse_y + 64)
-                    )
-                    .resize((zoom_w, zoom_h), Image.HAMMING)
-                    .filter(ImageFilter.SHARPEN)
-                    .filter(ImageFilter.SHARPEN)
-                    .filter(ImageFilter.SHARPEN)
-                )
-
-                self.zoomWindow.paintZoomedDepthmap(
-                    zoomed,
-                    mouse_x=mouse_x,
-                    mouse_y=mouse_y,
-                )
+            self.paintZoomedDepthmap(
+                zoomed,
+                mouse_x=mouse_x,
+                mouse_y=mouse_y,
+            )
 
     def redrawImage(self, *args, **kw):
         if not self.portrait:
@@ -187,15 +571,25 @@ class MainWindow(UILoaderMixin, QWidget):
         mouse_x = clamp(mouse_x, 0, const.MAIN_IMAGE_WIDTH)
         mouse_y = clamp(mouse_y, 0, const.MAIN_IMAGE_HEIGHT)
 
+        show_centroids = self.ui.showCentroidsCheckBox.isChecked()
+        show_neck_arc = self.ui.showNeckArcCheckBox.isChecked()
+        show_landmarks = self.ui.showMediaPipeLandmarksCheckBox.isChecked()
+
         if self.last_click_x is not None:
             if (
                 self.last_click_x == mouse_x
                 and self.last_click_y == mouse_y
                 and self.last_angle == angle
+                and self.last_show_centroids == show_centroids
+                and self.last_show_neck_arc == show_neck_arc
+                and self.last_show_landmarks == show_landmarks
             ):
                 return
 
         self.last_angle = angle
+        self.last_show_centroids = show_centroids
+        self.last_show_neck_arc = show_neck_arc
+        self.last_show_landmarks = show_landmarks
 
         img_w = const.MAIN_IMAGE_WIDTH
         img_h = const.MAIN_IMAGE_HEIGHT
@@ -232,39 +626,91 @@ class MainWindow(UILoaderMixin, QWidget):
                             self.portrait.teethmap.size,
                             (img_w, img_h),
                         )
-                        painter.drawLine(QPoint(*auto_id_click_1), QPoint(*auto_id_click_2))
+                        painter.drawLine(
+                            QPoint(*auto_id_click_1),
+                            QPoint(*auto_id_click_2),
+                        )
 
-            if self.neck_measurement:
-                neck_click_1 = translate_coordinates_to_other_image(
-                    (
-                        self.neck_measurement[0],
-                        self.neck_measurement[1],
-                    ),
-                    self.portrait.skinmap.size,
+                if (
+                    self.ui.showCentroidsCheckBox.isChecked()
+                    and self.portrait.incisor_measurement
+                ):
+                    im = self.portrait.incisor_measurement
+                    for centroid in (im.upper_centroid, im.lower_centroid):
+                        if centroid is None:
+                            continue
+                        cx, cy = translate_coordinates_to_other_image(
+                            centroid,
+                            self.portrait.teethmap.size,
+                            (img_w, img_h),
+                        )
+                        painter.setPen(Qt.NoPen)
+                        painter.setBrush(QColor(0, 255, 255, 200))
+                        painter.drawEllipse(QPoint(int(cx), int(cy)), 5, 5)
+                    painter.setBrush(Qt.NoBrush)
+                    painter.setPen(QColor(255, 255, 0, 127))
+
+            if self.ui.showNeckArcCheckBox.isChecked() and self.neck_measurement_auto:
+                arc_color = QColor(255, 165, 0, 200)
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(arc_color)
+                arc_display_pts = []
+                for px, py in self.neck_measurement_auto.arc_points_photo:
+                    dx, dy = translate_coordinates_to_other_image(
+                        (px, py),
+                        self.portrait.skinmap.size,
+                        (img_w, img_h),
+                    )
+                    arc_display_pts.append(QPoint(int(dx), int(dy)))
+                    painter.drawEllipse(QPoint(int(dx), int(dy)), 3, 3)
+                painter.setBrush(Qt.NoBrush)
+                pen = QtGui.QPen(arc_color, 2)
+                painter.setPen(pen)
+                for i in range(1, len(arc_display_pts)):
+                    painter.drawLine(arc_display_pts[i - 1], arc_display_pts[i])
+                painter.setPen(QColor(0, 0, 255, 127))
+
+            print(
+                f"Neck midpoint draw check: "
+                f"checkbox={self.ui.showNeckArcCheckBox.isChecked()}, "
+                f"midpoint={self.neck_midpoint}"
+            )
+            if self.ui.showNeckArcCheckBox.isChecked() and self.neck_midpoint:
+                mx, my = translate_coordinates_to_other_image(
+                    (self.neck_midpoint.x, self.neck_midpoint.y),
+                    self.image.size,
                     (img_w, img_h),
                 )
-                while self.get_depthmap_value(*neck_click_1) < 110:
-                    neck_click_1 = (neck_click_1[0] + 1, neck_click_1[1])
-                    if neck_click_1[0] > img_w:
-                        neck_click_1 = None
-                        break
+                midpoint_color = QColor(255, 0, 255, 200)
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(midpoint_color)
+                painter.drawEllipse(QPoint(int(mx), int(my)), 5, 5)
+                pen = QtGui.QPen(midpoint_color, 2)
+                painter.setPen(pen)
+                painter.setBrush(Qt.NoBrush)
+                painter.drawLine(int(mx) - 10, int(my), int(mx) + 10, int(my))
+                painter.drawLine(int(mx), int(my) - 10, int(mx), int(my) + 10)
 
-                neck_click_2 = translate_coordinates_to_other_image(
-                    (
-                        self.neck_measurement[2],
-                        self.neck_measurement[3],
-                    ),
-                    self.portrait.skinmap.size,
-                    (img_w, img_h),
-                )
-                while self.get_depthmap_value(*neck_click_2) < 110:
-                    neck_click_2 = (neck_click_2[0] - 1, neck_click_2[1])
-                    if neck_click_2[0] < 0:
-                        neck_click_2 = None
-                        break
-
-                if neck_click_2 is not None and neck_click_1 is not None:
-                    painter.drawLine(QPoint(*neck_click_1), QPoint(*neck_click_2))
+            if self.ui.showMediaPipeLandmarksCheckBox.isChecked() and self.mediapipe_debug:
+                landmark_color = QColor(0, 255, 0, 200)
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(landmark_color)
+                font = painter.font()
+                font.setPointSize(7)
+                painter.setFont(font)
+                for idx, (lx, ly) in enumerate(self.mediapipe_debug.landmarks):
+                    dx, dy = translate_coordinates_to_other_image(
+                        (lx, ly),
+                        self.image.size,
+                        (img_w, img_h),
+                    )
+                    painter.setPen(Qt.NoPen)
+                    painter.setBrush(landmark_color)
+                    painter.drawEllipse(QPoint(int(dx), int(dy)), 3, 3)
+                    painter.setPen(QColor(0, 255, 0))
+                    painter.setBrush(Qt.NoBrush)
+                    painter.drawText(int(dx) + 5, int(dy) - 2, str(idx))
+                painter.setBrush(Qt.NoBrush)
 
             if self.face:
                 painter.setPen(QColor(0, 0, 255, 127))
@@ -275,6 +721,14 @@ class MainWindow(UILoaderMixin, QWidget):
                     painter.setPen(QColor(0, 255, 0, 127))
                     rect = eye.translate_coordinates(img_w, img_h)
                     painter.drawRect(*rect)
+            elif self.standalone_eyes:
+                for eye in self.standalone_eyes:
+                    painter.setPen(QColor(0, 255, 0, 127))
+                    rx, ry, rw, rh = translate_coordinates(
+                        eye, img_w, img_h,
+                        self.image.size[0], self.image.size[1],
+                    )
+                    painter.drawRect(int(rx), int(ry), int(rw), int(rh))
 
             painter.setPen(QColor(0, 0, 255, 127))
 
@@ -287,7 +741,8 @@ class MainWindow(UILoaderMixin, QWidget):
             if self.last_click_x is not None:
                 painter.setPen(QColor(255, 0, 0, 127))
                 painter.drawLine(
-                    QPoint(mouse_x, mouse_y), QPoint(self.last_click_x, self.last_click_y)
+                    QPoint(mouse_x, mouse_y),
+                    QPoint(self.last_click_x, self.last_click_y),
                 )
         finally:
             painter.end()
@@ -334,7 +789,7 @@ class MainWindow(UILoaderMixin, QWidget):
                         mouse_x, mouse_y, 0, self.last_click_x, self.last_click_y, 0
                     ):
                         values.append(self.get_depthmap_value(pixels[0], pixels[1]))
-                    self.zoomWindow.paintReconstruction(values)
+                    self.paintReconstruction(values)
         finally:
             painter.end()
         self.ui.chartLabel.setPixmap(canvas)
@@ -401,10 +856,10 @@ class MainWindow(UILoaderMixin, QWidget):
             Line length (2D, on flat picture):
             {line_len:.2f} pixels
 
-            Vector length (3D) with depth:  
+            Vector length (3D) with depth:
             {vector_length_3d / 10.0:.2f} cm
-            
-            Sum of last 5 3D vector lengths: 
+
+            Sum of last 5 3D vector lengths:
             {sum(self.last_5_distances_vect) / 10.0:.2f} cm
             {[f"{x:.2f}" for x in self.last_5_distances_vect]}
 
@@ -418,27 +873,43 @@ class MainWindow(UILoaderMixin, QWidget):
             )
 
             if self.portrait.teeth_bbox:
-                txt += "\n\nTeeth detected. Automatic incisor distance:\n"
-                txt += "%.2f cm" % (
-                    self.vector_length_between_two_clicks(
-                        *auto_id_click_1, *auto_id_click_2
-                    )
-                    / 10.0
-                )
-
-            if self.neck_measurement:
-                if neck_click_2 is not None and neck_click_1 is not None:
-                    txt += "\n\nFace detected, neck probably analysed. Automatic neck circumference:\n"
+                txt += "\n\nTeeth detected."
+                if self.portrait.incisor_distance:
+                    txt += "\nAutomatic incisor distance (legacy): "
                     txt += "%.2f cm" % (
-                        get_circumference_of_circle(
-                            get_radius_of_circle_described_on_equilateral(
-                                self.vector_length_between_two_clicks(
-                                    *neck_click_1, *neck_click_2
-                                )
-                                / 10.0
-                            )
+                        self.vector_length_between_two_clicks(
+                            *auto_id_click_1, *auto_id_click_2
                         )
+                        / 10.0
                     )
+                im = self.portrait.incisor_measurement
+                if im and im.distance_3d_mm is not None:
+                    txt += (
+                        "\nAutomatic incisor distance"
+                        " (centroid): "
+                    )
+                    txt += "%.2f cm" % (
+                        im.distance_3d_mm / 10.0
+                    )
+
+            if self.neck_measurement_auto:
+                nma = self.neck_measurement_auto
+                txt += (
+                    "\n\nAutomatic neck circumference"
+                    " (3D arc): "
+                )
+                txt += "%.2f cm" % (
+                    nma.circumference_mm / 10.0
+                )
+                txt += "\n  Front arc: %.2f mm" % (
+                    nma.front_arc_length_mm
+                )
+                txt += "\n  Multiplier: %.1f" % (
+                    nma.circumference_multiplier
+                )
+                txt += "\n  Arc points: %d" % len(
+                    nma.arc_points_photo
+                )
 
             if (
                 closeness_delta_mm is not None
@@ -453,7 +924,9 @@ class MainWindow(UILoaderMixin, QWidget):
                     pass
 
                 txt += (
-                    "\n\nNeck circumference estimation for last 2 clicks (equilateral triangle): %.2f"
+                    "\n\nNeck circumference estimation"
+                    " for last 2 clicks"
+                    " (equilateral triangle): %.2f"
                     % (
                         get_circumference_of_circle(
                             get_radius_of_circle_described_on_equilateral(
@@ -465,12 +938,21 @@ class MainWindow(UILoaderMixin, QWidget):
                 )
 
                 txt += (
-                    "\n\nNeck circumference estimation for last 2 clicks (radius): %.2f"
-                    % (get_circumference_of_circle(vector_length_3d) / 10.0)
+                    "\n\nNeck circumference estimation"
+                    " for last 2 clicks"
+                    " (radius): %.2f"
+                    % (
+                        get_circumference_of_circle(
+                            vector_length_3d
+                        )
+                        / 10.0
+                    )
                 )
 
                 txt += (
-                    "\n\nNeck circumference estimation for last 2 clicks (square): %.2f"
+                    "\n\nNeck circumference estimation"
+                    " for last 2 clicks"
+                    " (square): %.2f"
                     % (
                         get_circumference_of_circle(
                             get_radius_of_circle_described_on_square(vector_length_3d)
@@ -572,17 +1054,15 @@ class MainWindow(UILoaderMixin, QWidget):
         return line_len
 
     def how_many_pixels_per_mm_at_distance_on_big_image(self, distance, mm):
-        """Returns how many pixels take up a 1 milimiter at a given distance (cm) from camera.
+        """Return pixel count per mm at a given distance from camera.
 
-        Constants taken from own calibration data and a curve fitted by MyCurveFit.com,
-        I strongly recommend their service, it is very easy to use and affordable.
+        Constants taken from own calibration data and a curve
+        fitted by MyCurveFit.com. I strongly recommend their
+        service, it is very easy to use and affordable.
 
-        :param distance: The distance in centimeters from the camera
-        :param no_pixels: line length in pixels, must be in original image size (2300x3000)
+        :param distance: distance in centimeters from the camera
+        :param mm: millimeters (unused, kept for API compat)
         """
-        # return mm * -0.04378155 + (189.5944 - -0.04378155) / (
-        #     1 + (distance / 1.81124) ** 1.056448
-        # )
         return (
             30.79912
             - 1.346418 * distance
@@ -616,7 +1096,6 @@ class MainWindow(UILoaderMixin, QWidget):
             if self.float_min_value is not None:
                 self.float_min_value = float(self.float_min_value)
 
-            # self.depthmap = self.depthmap.filter(ImageFilter.GaussianBlur)
         except ExifValidationFailed as e:
             QMessageBox.critical(
                 self,
@@ -633,24 +1112,30 @@ class MainWindow(UILoaderMixin, QWidget):
             self.critical_error(QObject.tr("Unknown file extension (%s)" % e))
             return
 
-        self.smallImage = self.image.resize((const.MAIN_IMAGE_WIDTH, const.MAIN_IMAGE_HEIGHT))
-
-        # If pictures taken with the back camera, the main miage should be mirrored to match
-        # the depth map... then the depth map should be mirrored if printing in 3D... currently
-        # I'm leaving this comment & not supporting it (the back camera).
-        # self.depthmap = ImageOps.mirror(self.depthmap)
+        self.smallImage = self.image.resize(
+            (const.MAIN_IMAGE_WIDTH, const.MAIN_IMAGE_HEIGHT)
+        )
 
         #
         # Get face position, if any:
         #
 
-        self.neck_measurement = None
+        self.neck_measurement_auto = None
+        self.neck_midpoint = None
+        self.mediapipe_debug = None
         self.face_proper = False
+
+        # Always detect standalone eyes — used as fallback for neck search
+        # when face has <2 eyes, and for drawing when face is absent.
+        self.standalone_eyes = detect_eyes(self.image)
+        img_w = self.image.size[0]
+
         try:
             self.face = get_face_parameters(self.image, raise_opencv_exceptions=True)
         except NoFacesDetected:
             self.face = None
-            self.critical_error(errors.FACE_NOT_DETECTED)
+            if not self.standalone_eyes:
+                self.critical_error(errors.FACE_NOT_DETECTED)
 
         except MultipleFacesDetected:
             self.critical_error(errors.MULTIPLE_FACES_DETECTED)
@@ -680,7 +1165,13 @@ class MainWindow(UILoaderMixin, QWidget):
             # Set lower point somewhere around mouth (below nose, above chin)
 
             self.ui.xValue.setValue(
-                int(round(self.face.center_x / self.image.size[0] * (const.MAIN_IMAGE_WIDTH - 1)))
+                int(
+                    round(
+                        self.face.center_x
+                        / self.image.size[0]
+                        * (const.MAIN_IMAGE_WIDTH - 1)
+                    )
+                )
             )
             self.ui.yValue.setValue(
                 int(
@@ -692,10 +1183,57 @@ class MainWindow(UILoaderMixin, QWidget):
                 )
             )
 
-            if self.portrait.skinmap and self.face and self.face_proper:
-                self.neck_measurement = find_neck_measurement_point(
-                    self.portrait.skinmap, self.face
-                )
+        # Detect MediaPipe pose landmarks (mouth + shoulders → search bounds)
+        try:
+            result = detect_neck_midpoint(self.image)
+            if result:
+                self.neck_midpoint, self.mediapipe_debug = result
+                print(f"Neck midpoint detected: {self.neck_midpoint}")
+                print(f"  x={self.neck_midpoint.x}, y={self.neck_midpoint.y}")
+            else:
+                self.neck_midpoint = None
+                self.mediapipe_debug = None
+        except Exception as e:
+            print(f"detect_neck_midpoint failed: {type(e).__name__}: {e}")
+            self.neck_midpoint = None
+            self.mediapipe_debug = None
+
+        # Compute MediaPipe search bounds: mouth → neck midpoint.
+        # The narrowest neck is between the chin and mid-cervical level,
+        # NOT between mouth and shoulders (that range includes the collar
+        # line where skin disappears — the global minimum, not the neck).
+        scan_start_y = None
+        scan_end_y = None
+        if self.neck_midpoint:
+            mouth_y = max(
+                self.neck_midpoint.mouth_left[1],
+                self.neck_midpoint.mouth_right[1],
+            )
+            scan_start_y = round(mouth_y)
+            scan_end_y = round(self.neck_midpoint.y)
+
+        has_eyes = len(self.standalone_eyes) >= 2
+        if self.portrait.skinmap and self.portrait.depthmap and (
+            self.face_proper or has_eyes
+        ):
+            self.neck_measurement_auto = compute_neck_circumference(
+                skinmap=self.portrait.skinmap,
+                depthmap=self.portrait.depthmap,
+                photo_width=img_w,
+                photo_height=self.image.size[1],
+                float_min=self.portrait.floatValueMin,
+                float_max=self.portrait.floatValueMax,
+                face_location=self.face,
+                eyes=self.standalone_eyes,
+                image_width=img_w,
+                scan_start_y=scan_start_y,
+                scan_end_y=scan_end_y,
+                neck_midpoint_y=(
+                    self.neck_midpoint.y
+                    if self.neck_midpoint
+                    else None
+                ),
+            )
 
         self.last_click_y = self.last_click_x = None
         self.last_clicks = []
@@ -723,11 +1261,6 @@ class MainWindow(UILoaderMixin, QWidget):
             tr(err),
             QMessageBox.Cancel,
         )
-
-    def showZoomWindow(self, *args, **kw):
-        if self.zoomWindow:
-            self.zoomWindow.show()
-            self.zoomWindow.raise_()
 
     def loadJPEG(self, *args, **kw):
         settings = QSettings("FIDMAA - open file")
@@ -791,7 +1324,6 @@ class MainWindow(UILoaderMixin, QWidget):
         canvas = QtGui.QPixmap(const.DEPTH_CHART_WIDTH, const.DEPTH_CHART_HEIGHT)
         self.ui.chartLabel.setPixmap(canvas)
 
-        self.ui.showZoomWindowButton.clicked.connect(self.showZoomWindow)
         self.ui.loadJPEGButton.clicked.connect(self.loadJPEG)
         self.ui.open3DViewButton.clicked.connect(self.open3DView)
         self.ui.imageLabel.clicked.connect(self.setMidlinePoint)
@@ -801,6 +1333,9 @@ class MainWindow(UILoaderMixin, QWidget):
         self.ui.chartLabel.clicked.connect(self.setMidlineY)
 
         self.ui.angleValue.valueChanged.connect(self.redrawImage)
+        self.ui.showCentroidsCheckBox.stateChanged.connect(self.redrawImage)
+        self.ui.showNeckArcCheckBox.stateChanged.connect(self.redrawImage)
+        self.ui.showMediaPipeLandmarksCheckBox.stateChanged.connect(self.redrawImage)
 
         self.ui.angleValue.setValue(90)
         self.ui.angleSlider.setValue(90)
@@ -808,15 +1343,18 @@ class MainWindow(UILoaderMixin, QWidget):
 
 def main():
     app = QApplication(sys.argv)
+    app.setApplicationName("FIDMAA GUI")
+    app.setApplicationDisplayName("FIDMAA GUI")
 
-    zoomWindow = ZoomWindow()
-    zoomWindow.setWindowTitle("FIDMAA zoom")
-    zoomWindow.show()
-    zoomWindow.move(10, 10)
-
-    mainWindow = MainWindow(zoomWindow=zoomWindow)
+    mainWindow = MainWindow()
     mainWindow.updateWindowTitle()
     mainWindow.show()
+
+    screen = app.primaryScreen().geometry()
+    mainWindow.move(
+        (screen.width() - mainWindow.width()) // 2,
+        (screen.height() - mainWindow.height()) // 2,
+    )
 
     try:
         if sys.argv[1]:

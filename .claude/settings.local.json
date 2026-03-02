@@ -4,7 +4,10 @@
       "Bash(wc:*)",
       "WebFetch(domain:pypi.org)",
       "Bash(head:*)",
-      "WebFetch(domain:qtdocs.pyvista.org)"
+      "WebFetch(domain:qtdocs.pyvista.org)",
+      "Bash(ls:*)",
+      "WebFetch(domain:ai.google.dev)",
+      "WebFetch(domain:developers.google.com)"
     ]
   }
 }

@@ -9,6 +9,7 @@ from PIL import ImageFile
 from PySide6 import QtGui
 from PySide6.QtCore import QFile, QObject
 from PySide6.QtUiTools import QUiLoader
+from PySide6.QtWidgets import QMainWindow, QVBoxLayout
 
 from .QClickableLabel import QClickableLabel
 
@@ -97,7 +98,13 @@ class UILoaderMixin:
         self.ui = loader.load(ui_file, self)
         ui_file.close()
 
-        self.ui.show()
+        if isinstance(self, QMainWindow):
+            self.setCentralWidget(self.ui)
+        else:
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.addWidget(self.ui)
+
         self.connect_ui()
 
     def connect_ui(self):

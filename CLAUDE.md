@@ -25,10 +25,9 @@ No test suite exists in this project.
 
 ## Architecture
 
-- **Entrypoint**: `fidmaa_gui.entrypoints:run` launches `app.main()` which creates QApplication with two windows
-- **MainWindow** (`app.py`): Primary window — loads HEIC images via `portrait_analyser` library, displays photo at 480x640, renders depth chart at 255x640, handles all click-based measurement logic
-- **ZoomWindow** (`zoomWindow.py`): Secondary window showing zoomed views of photo, depth map, skin map, teeth map, and a depth reconstruction chart
-- **UI files**: Qt `.ui` files (`form.ui`, `zoom_window.ui`) loaded at runtime via `UILoaderMixin` in `utils.py` using a custom `QUiLoader` that registers `QClickableLabel`
+- **Entrypoint**: `fidmaa_gui.entrypoints:run` launches `app.main()` which creates QApplication with a single MainWindow
+- **MainWindow** (`app.py`): QMainWindow — loads HEIC images via `portrait_analyser` library, displays photo at 480x640, renders depth chart at 255x640, handles all click-based measurement logic. Contains a bottom QDockWidget with zoomed depth map, tabbed photo/skin/teeth views, and reconstruction chart.
+- **UI file**: `form.ui` loaded at runtime via `UILoaderMixin` in `utils.py` using a custom `QUiLoader` that registers `QClickableLabel`
 - **QClickableLabel** (`QClickableLabel.py`): Custom QLabel widget emitting click/drag signals
 
 ## Key Dependencies

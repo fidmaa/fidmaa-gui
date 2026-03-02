@@ -22,5 +22,12 @@ macos-copy-files:
 	mkdir -p dist/fidmaa_gui.app/Contents/MacOS/pyheif/data/
 	cp -R $(VENV_PATH)/lib/python3*/site-packages/pyheif/data/ ./dist/fidmaa_gui.app/Contents/MacOS/pyheif/data/
 
+local-dev:
+	uv sync
+	uv pip install -e '../portrait-analyser[pose]'
+	@echo ""
+	@echo "Local portrait-analyser installed. Use 'uv run --no-sync' to avoid reverting it."
+	@echo "Example: uv run --no-sync fidmaa_gui"
+
 zip-app:
 	cd dist && zip -r fidmaa_gui.app.zip fidmaa_gui.app
