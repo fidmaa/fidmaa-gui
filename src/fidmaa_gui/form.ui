@@ -6,7 +6,7 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>1053</width>
+    <width>1103</width>
     <height>640</height>
    </rect>
   </property>
@@ -178,9 +178,42 @@
      <item>
       <widget class="QCheckBox" name="showMediaPipeLandmarksCheckBox">
        <property name="text">
-        <string>Show MediaPipe landmarks</string>
+        <string>Show MediaPipe Pose landmarks</string>
        </property>
        <property name="checked">
+        <bool>false</bool>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QCheckBox" name="showFaceMeshLandmarksCheckBox">
+       <property name="text">
+        <string>Show MediaPipe FaceMesh landmarks</string>
+       </property>
+       <property name="checked">
+        <bool>false</bool>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QCheckBox" name="showSegmentationDebugCheckBox">
+       <property name="text">
+        <string>Show segmentation debug</string>
+       </property>
+       <property name="checked">
+        <bool>false</bool>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="forceExtendedNeckButton">
+       <property name="text">
+        <string>Force extended neck analysis</string>
+       </property>
+       <property name="toolTip">
+        <string>Skip MediaPipe and re-run analysis using segmentation/depth profile method</string>
+       </property>
+       <property name="enabled">
         <bool>false</bool>
        </property>
       </widget>

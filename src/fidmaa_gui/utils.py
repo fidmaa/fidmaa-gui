@@ -46,38 +46,23 @@ def CV2_to_QImage(cv2_image):
     ).rgbSwapped()
 
 
-def interpolate_pixels_along_line(x1, y1, z1, x2, y2, z2):
+def interpolate_pixels_along_line(x1, y1, x2, y2):
+    """Yield (x, y) pixel coordinates along a line between two points."""
     dist_x = x2 - x1
     dist_y = y2 - y1
-    dist_z = z2 - z1
 
-    # line_len = math.sqrt(dist_x**2 + dist_y**2 + dist_z**2)
-
-    abs_dist_x = abs(dist_x)
-    abs_dist_y = abs(dist_y)
-    abs_dist_z = abs(dist_z)
-
-    if abs_dist_x >= abs_dist_y and abs_dist_x >= abs_dist_z:
-        no_steps = abs_dist_x
-    elif abs_dist_y >= abs_dist_x and abs_dist_y >= abs_dist_z:
-        no_steps = abs_dist_y
-    elif abs_dist_z >= abs_dist_x and abs_dist_z >= abs_dist_y:
-        no_steps = abs_dist_z
-    else:
-        raise NotImplementedError(dist_x, dist_y, dist_z)
+    no_steps = int(max(abs(dist_x), abs(dist_y)))
 
     if no_steps == 0:
         return
 
     delta_x = dist_x / no_steps
     delta_y = dist_y / no_steps
-    delta_z = dist_z / no_steps
 
-    for a in range(no_steps + 1):
-        yield (x1, y1, z1)
+    for _ in range(no_steps + 1):
+        yield (x1, y1)
         x1 += delta_x
         y1 += delta_y
-        z1 += delta_z
 
 
 def clamp(n, minn, maxn):

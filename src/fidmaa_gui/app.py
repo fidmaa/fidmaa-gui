@@ -1,25 +1,21 @@
 import math
 import os
 import sys
-import traceback
 from textwrap import dedent
+
+import numpy as np
 
 from PIL import Image, ImageFile, ImageFilter
 from portrait_analyser.exceptions import (
     ExifValidationFailed,
-    MultipleFacesDetected,
     NoDepthMapFound,
-    NoFacesDetected,
     UnknownExtension,
 )
-from portrait_analyser.face import (
-    detect_eyes,
-    get_face_parameters,
-    translate_coordinates,
-)
+from portrait_analyser.tmd import compute_tmd_3d
 from portrait_analyser.ios import IOSPortrait, load_image
+from portrait_analyser.mouth import compute_mouth_measurement_from_facemesh
 from portrait_analyser.neck import compute_neck_circumference
-from portrait_analyser.pose import MediaPipeDebug, detect_neck_midpoint
+from portrait_analyser.pose import PortraitPose, detect_neck_midpoint
 from PySide6 import QtGui
 from PySide6.QtCore import QObject, QPoint, QSettings, Qt
 from PySide6.QtGui import QColor
@@ -40,9 +36,6 @@ from .calculations import findPoint
 from .utils import (
     UILoaderMixin,
     clamp,
-    get_circumference_of_circle,
-    get_radius_of_circle_described_on_equilateral,
-    get_radius_of_circle_described_on_square,
     interpolate_pixels_along_line,
     translate_coordinates_to_other_image,
 )
@@ -68,8 +61,6 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self._create_zoom_panel()
 
         self.filename = None
-        self.face = None
-        self.standalone_eyes = []
 
         self.smallImage = None
         self.portrait: IOSPortrait = None
@@ -85,7 +76,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.last_show_centroids = None
         self.last_show_neck_arc = None
         self.last_show_landmarks = None
-        self.face = None
+        self.last_show_segmentation = None
+        self.hairless_depth_image = None
 
         self.last_5_distances_vect = []
         self.last_5_distances_srfc = []
@@ -114,23 +106,17 @@ class MainWindow(UILoaderMixin, QMainWindow):
         row1.setSpacing(2)
 
         self.zoomedDepthMapLabel = QLabel("Depth Map")
-        self.zoomedDepthMapLabel.setSizePolicy(
-            QSizePolicy.Ignored, QSizePolicy.Ignored
-        )
+        self.zoomedDepthMapLabel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.zoomedDepthMapLabel.setStyleSheet("border:1px solid;")
         row1.addWidget(self.zoomedDepthMapLabel, stretch=1)
 
         self.zoomedTeethMapLabel = QLabel("Teeth Map")
-        self.zoomedTeethMapLabel.setSizePolicy(
-            QSizePolicy.Ignored, QSizePolicy.Ignored
-        )
+        self.zoomedTeethMapLabel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.zoomedTeethMapLabel.setStyleSheet("border:1px solid;")
         row1.addWidget(self.zoomedTeethMapLabel, stretch=1)
 
         self.reconstructionLabel = QLabel("Reconstruction")
-        self.reconstructionLabel.setSizePolicy(
-            QSizePolicy.Ignored, QSizePolicy.Ignored
-        )
+        self.reconstructionLabel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.reconstructionLabel.setStyleSheet("border:1px solid;")
         row1.addWidget(self.reconstructionLabel, stretch=1)
 
@@ -141,25 +127,19 @@ class MainWindow(UILoaderMixin, QMainWindow):
         row2.setSpacing(2)
 
         self.zoomedImageLabel = QLabel("Photo")
-        self.zoomedImageLabel.setSizePolicy(
-            QSizePolicy.Ignored, QSizePolicy.Ignored
-        )
+        self.zoomedImageLabel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.zoomedImageLabel.setStyleSheet("border:1px solid;")
         row2.addWidget(self.zoomedImageLabel, stretch=1)
 
         self.zoomedSkinMapLabel = QLabel("Skin Matte")
-        self.zoomedSkinMapLabel.setSizePolicy(
-            QSizePolicy.Ignored, QSizePolicy.Ignored
-        )
+        self.zoomedSkinMapLabel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.zoomedSkinMapLabel.setStyleSheet("border:1px solid;")
         row2.addWidget(self.zoomedSkinMapLabel, stretch=1)
 
-        self.zoomedHairMapLabel = QLabel("Hair Matte")
-        self.zoomedHairMapLabel.setSizePolicy(
-            QSizePolicy.Ignored, QSizePolicy.Ignored
-        )
-        self.zoomedHairMapLabel.setStyleSheet("border:1px solid;")
-        row2.addWidget(self.zoomedHairMapLabel, stretch=1)
+        self.skinMaskLabel = QLabel("Depth (hairless)")
+        self.skinMaskLabel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        self.skinMaskLabel.setStyleSheet("border:1px solid;")
+        row2.addWidget(self.skinMaskLabel, stretch=1)
 
         zoom_panel_layout.addLayout(row2)
 
@@ -279,11 +259,22 @@ class MainWindow(UILoaderMixin, QMainWindow):
             font = painter.font()
             font.setPixelSize(max(16, h // 10))
             painter.setFont(font)
-            painter.setPen(QColor(0, 255, 0, 255))
+            half_w = w // 2
+            half_h = h // 2
+            try:
+                value = skinmap.getpixel((half_w, half_h))[0]
+            except TypeError:
+                value = skinmap.getpixel((half_w, half_h))
+
+            if value < 100:
+                painter.setPen(QColor(255, 0, 0, 255))
+            else:
+                painter.setPen(QColor(0, 255, 0, 255))
             painter.drawText(QPoint(50, 50), "Skin matte")
+            painter.drawText(QPoint(50, 100), str(value))
             if mouse_x is not None and mouse_y is not None:
                 painter.drawText(
-                    QPoint(50, 100), str(int(mouse_x)) + " x " + str(int(mouse_y))
+                    QPoint(50, 150), str(int(mouse_x)) + " x " + str(int(mouse_y))
                 )
 
             if neck_arc_points and crop_origin and crop_size:
@@ -309,13 +300,44 @@ class MainWindow(UILoaderMixin, QMainWindow):
             painter.end()
         self.zoomedSkinMapLabel.setPixmap(canvas)
 
-    def paintZoomedHairmap(self, hairmap, mouse_x=None, mouse_y=None):
-        w = self.zoomedHairMapLabel.width()
-        h = self.zoomedHairMapLabel.height()
+    def _build_hairless_depth_image(self):
+        """Build hairless depth map (depth with hair zeroed out) as a PIL Image."""
+        from PIL import Image as PILImage
+
+        if not self.portrait or self.portrait.depthmap is None:
+            self.hairless_depth_image = None
+            return
+
+        depth_arr = np.array(self.portrait.depthmap)
+        if depth_arr.ndim == 3:
+            depth_arr = depth_arr[:, :, 0]
+        depth_arr = depth_arr.copy()
+        dh, dw = depth_arr.shape[:2]
+
+        if self.portrait.hairmap is not None:
+            import cv2
+
+            hair_arr = np.array(self.portrait.hairmap)
+            if hair_arr.ndim == 3:
+                hair_arr = hair_arr[:, :, 0]
+            if hair_arr.shape[:2] != (dh, dw):
+                hair_arr = cv2.resize(
+                    hair_arr, (dw, dh), interpolation=cv2.INTER_LINEAR
+                )
+            depth_arr[hair_arr >= 5] = 0
+
+        self.hairless_depth_image = PILImage.fromarray(depth_arr, mode="L")
+
+    def paintHairlessDepthFull(self):
+        """Display the full hairless depth map scaled to fit the label."""
+        if self.hairless_depth_image is None:
+            return
+        w = self.skinMaskLabel.width()
+        h = self.skinMaskLabel.height()
         if w < 1 or h < 1:
             return
 
-        qimg = hairmap.toqimage().scaled(w, h, Qt.KeepAspectRatio)
+        qimg = self.hairless_depth_image.toqimage().scaled(w, h, Qt.KeepAspectRatio)
         canvas = QtGui.QPixmap(w, h)
         canvas.fill(Qt.black)
         painter = QtGui.QPainter(canvas)
@@ -324,24 +346,24 @@ class MainWindow(UILoaderMixin, QMainWindow):
             offset_y = (h - qimg.height()) // 2
             painter.drawImage(offset_x, offset_y, qimg)
 
-            painter.setPen(QColor(255, 0, 0, 255))
-            half_w = w // 2
-            half_h = h // 2
-            painter.drawLine(QPoint(half_w, 0), QPoint(half_w, h))
-            painter.drawLine(QPoint(0, half_h), QPoint(w, half_h))
-
             font = painter.font()
             font.setPixelSize(max(16, h // 10))
             painter.setFont(font)
             painter.setPen(QColor(0, 255, 0, 255))
-            painter.drawText(QPoint(50, 50), "Hair matte")
-            if mouse_x is not None and mouse_y is not None:
-                painter.drawText(
-                    QPoint(50, 100), str(int(mouse_x)) + " x " + str(int(mouse_y))
-                )
+            painter.drawText(QPoint(5, 20), "Depth (hairless)")
         finally:
             painter.end()
-        self.zoomedHairMapLabel.setPixmap(canvas)
+        self.skinMaskLabel.setPixmap(canvas)
+
+    def paintZoomedHairlessDepth(self, zoomed, mouse_x=None, mouse_y=None):
+        """Display zoomed hairless depth map with value readout."""
+        self._paintZoomedMap(
+            "Depth (hairless)",
+            zoomed,
+            self.skinMaskLabel,
+            mouse_x,
+            mouse_y,
+        )
 
     def paintZoomedTeethmap(
         self,
@@ -479,10 +501,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
             neck_arc_points = None
             skin_crop_origin = None
             skin_crop_size = None
-            if (
-                self.ui.showNeckArcCheckBox.isChecked()
-                and self.neck_measurement_auto
-            ):
+            if self.ui.showNeckArcCheckBox.isChecked() and self.neck_measurement_auto:
                 neck_arc_points = self.neck_measurement_auto.arc_points_photo
                 skin_crop_origin = (skinmap_x - crop_w, skinmap_y - crop_h)
                 skin_crop_size = (crop_w * 2, crop_h * 2)
@@ -496,19 +515,18 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 crop_size=skin_crop_size,
             )
 
-        if self.portrait and self.portrait.hairmap:
-            hairmap_x, hairmap_y = translate_coordinates_to_other_image(
-                (mouse_x, mouse_y), (img_w, img_h), self.portrait.hairmap.size
+        if self.hairless_depth_image is not None:
+            hd_x, hd_y = translate_coordinates_to_other_image(
+                (mouse_x, mouse_y),
+                (img_w, img_h),
+                self.hairless_depth_image.size,
             )
-            zoomed = self.portrait.hairmap.crop(
-                (
-                    hairmap_x - crop_w,
-                    hairmap_y - crop_h,
-                    hairmap_x + crop_w,
-                    hairmap_y + crop_h,
-                )
+            zoomed = self.hairless_depth_image.crop(
+                (hd_x - 72, hd_y - 48, hd_x + 72, hd_y + 48)
             ).resize((zoom_w, zoom_h))
-            self.paintZoomedHairmap(zoomed, mouse_x=hairmap_x, mouse_y=hairmap_y)
+            self.paintZoomedHairlessDepth(zoomed, mouse_x=hd_x, mouse_y=hd_y)
+        else:
+            self.paintHairlessDepthFull()
 
         if self.portrait and self.portrait.teethmap:
             teethmap_x, teethmap_y = translate_coordinates_to_other_image(
@@ -574,22 +592,27 @@ class MainWindow(UILoaderMixin, QMainWindow):
         show_centroids = self.ui.showCentroidsCheckBox.isChecked()
         show_neck_arc = self.ui.showNeckArcCheckBox.isChecked()
         show_landmarks = self.ui.showMediaPipeLandmarksCheckBox.isChecked()
+        show_face_mesh = self.ui.showFaceMeshLandmarksCheckBox.isChecked()
+        show_segmentation = self.ui.showSegmentationDebugCheckBox.isChecked()
 
-        if self.last_click_x is not None:
-            if (
-                self.last_click_x == mouse_x
-                and self.last_click_y == mouse_y
-                and self.last_angle == angle
-                and self.last_show_centroids == show_centroids
-                and self.last_show_neck_arc == show_neck_arc
-                and self.last_show_landmarks == show_landmarks
-            ):
-                return
+        if self.last_click_x is not None and (
+            self.last_click_x == mouse_x
+            and self.last_click_y == mouse_y
+            and self.last_angle == angle
+            and self.last_show_centroids == show_centroids
+            and self.last_show_neck_arc == show_neck_arc
+            and self.last_show_landmarks == show_landmarks
+            and self.last_show_face_mesh == show_face_mesh
+            and self.last_show_segmentation == show_segmentation
+        ):
+            return
 
         self.last_angle = angle
         self.last_show_centroids = show_centroids
         self.last_show_neck_arc = show_neck_arc
         self.last_show_landmarks = show_landmarks
+        self.last_show_face_mesh = show_face_mesh
+        self.last_show_segmentation = show_segmentation
 
         img_w = const.MAIN_IMAGE_WIDTH
         img_h = const.MAIN_IMAGE_HEIGHT
@@ -650,6 +673,29 @@ class MainWindow(UILoaderMixin, QMainWindow):
                     painter.setBrush(Qt.NoBrush)
                     painter.setPen(QColor(255, 255, 0, 127))
 
+                # FaceMesh mouth opening fallback (green circles + dashed line)
+                if self.ui.showCentroidsCheckBox.isChecked() and self.mouth_measurement:
+                    mm = self.mouth_measurement
+                    fm_mouth_color = QColor(0, 200, 0, 200)
+                    points = []
+                    for pt in (mm.upper_point, mm.lower_point):
+                        dx, dy = translate_coordinates_to_other_image(
+                            pt,
+                            self.image.size,
+                            (img_w, img_h),
+                        )
+                        painter.setPen(Qt.NoPen)
+                        painter.setBrush(fm_mouth_color)
+                        painter.drawEllipse(QPoint(int(dx), int(dy)), 5, 5)
+                        points.append(QPoint(int(dx), int(dy)))
+                    if len(points) == 2:
+                        dash_pen = QtGui.QPen(fm_mouth_color, 2, Qt.DashLine)
+                        painter.setPen(dash_pen)
+                        painter.setBrush(Qt.NoBrush)
+                        painter.drawLine(points[0], points[1])
+                    painter.setBrush(Qt.NoBrush)
+                    painter.setPen(QColor(255, 255, 0, 127))
+
             if self.ui.showNeckArcCheckBox.isChecked() and self.neck_measurement_auto:
                 arc_color = QColor(255, 165, 0, 200)
                 painter.setPen(Qt.NoPen)
@@ -675,7 +721,12 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 f"checkbox={self.ui.showNeckArcCheckBox.isChecked()}, "
                 f"midpoint={self.neck_midpoint}"
             )
-            if self.ui.showNeckArcCheckBox.isChecked() and self.neck_midpoint:
+            if (
+                self.ui.showNeckArcCheckBox.isChecked()
+                and self.neck_midpoint
+                and self.neck_midpoint.x is not None
+                and self.neck_midpoint.pose == PortraitPose.NEUTRAL_NECK
+            ):
                 mx, my = translate_coordinates_to_other_image(
                     (self.neck_midpoint.x, self.neck_midpoint.y),
                     self.image.size,
@@ -691,7 +742,51 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 painter.drawLine(int(mx) - 10, int(my), int(mx) + 10, int(my))
                 painter.drawLine(int(mx), int(my) - 10, int(mx), int(my) + 10)
 
-            if self.ui.showMediaPipeLandmarksCheckBox.isChecked() and self.mediapipe_debug:
+            # Draw chin point and TMD line (always, no checkbox)
+            if (
+                self.neck_midpoint
+                and self.neck_midpoint.x is not None
+                and self.neck_midpoint.pose
+                in (PortraitPose.EXTENDED_NECK, PortraitPose.NEUTRAL_NECK)
+            ):
+                midpoint_color = QColor(255, 0, 255, 200)
+                mx, my = translate_coordinates_to_other_image(
+                    (self.neck_midpoint.x, self.neck_midpoint.y),
+                    self.image.size,
+                    (img_w, img_h),
+                )
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(midpoint_color)
+                painter.drawEllipse(QPoint(int(mx), int(my)), 5, 5)
+                pen = QtGui.QPen(midpoint_color, 2)
+                painter.setPen(pen)
+                painter.setBrush(Qt.NoBrush)
+                painter.drawLine(int(mx) - 10, int(my), int(mx) + 10, int(my))
+                painter.drawLine(int(mx), int(my) - 10, int(mx), int(my) + 10)
+
+                cx, cy = translate_coordinates_to_other_image(
+                    self.neck_midpoint.chin,
+                    self.image.size,
+                    (img_w, img_h),
+                )
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(midpoint_color)
+                painter.drawEllipse(QPoint(int(cx), int(cy)), 5, 5)
+                pen = QtGui.QPen(midpoint_color, 2)
+                painter.setPen(pen)
+                painter.setBrush(Qt.NoBrush)
+                painter.drawLine(int(cx) - 10, int(cy), int(cx) + 10, int(cy))
+                painter.drawLine(int(cx), int(cy) - 10, int(cx), int(cy) + 10)
+
+                # Dashed line from chin to neck midpoint
+                dash_pen = QtGui.QPen(midpoint_color, 2, Qt.DashLine)
+                painter.setPen(dash_pen)
+                painter.drawLine(QPoint(int(cx), int(cy)), QPoint(int(mx), int(my)))
+
+            if (
+                self.ui.showMediaPipeLandmarksCheckBox.isChecked()
+                and self.mediapipe_debug
+            ):
                 landmark_color = QColor(0, 255, 0, 200)
                 painter.setPen(Qt.NoPen)
                 painter.setBrush(landmark_color)
@@ -712,23 +807,193 @@ class MainWindow(UILoaderMixin, QMainWindow):
                     painter.drawText(int(dx) + 5, int(dy) - 2, str(idx))
                 painter.setBrush(Qt.NoBrush)
 
-            if self.face:
-                painter.setPen(QColor(0, 0, 255, 127))
-                face_rect = self.face.translate_coordinates(img_w, img_h)
-                painter.drawRect(*face_rect)
-
-                for eye in self.face.eyes:
-                    painter.setPen(QColor(0, 255, 0, 127))
-                    rect = eye.translate_coordinates(img_w, img_h)
-                    painter.drawRect(*rect)
-            elif self.standalone_eyes:
-                for eye in self.standalone_eyes:
-                    painter.setPen(QColor(0, 255, 0, 127))
-                    rx, ry, rw, rh = translate_coordinates(
-                        eye, img_w, img_h,
-                        self.image.size[0], self.image.size[1],
+            if (
+                self.ui.showFaceMeshLandmarksCheckBox.isChecked()
+                and self.face_mesh_debug
+            ):
+                fm_color = QColor(255, 165, 0, 180)
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(fm_color)
+                font = painter.font()
+                font.setPointSize(5)
+                painter.setFont(font)
+                for idx, (lx, ly) in enumerate(self.face_mesh_debug.landmarks):
+                    dx, dy = translate_coordinates_to_other_image(
+                        (lx, ly),
+                        self.image.size,
+                        (img_w, img_h),
                     )
-                    painter.drawRect(int(rx), int(ry), int(rw), int(rh))
+                    painter.setPen(Qt.NoPen)
+                    painter.setBrush(fm_color)
+                    painter.drawEllipse(QPoint(int(dx), int(dy)), 2, 2)
+                    painter.setPen(QColor(255, 165, 0))
+                    painter.setBrush(Qt.NoBrush)
+                    painter.drawText(int(dx) + 4, int(dy) - 2, str(idx))
+                painter.setBrush(Qt.NoBrush)
+
+            # Segmentation debug overlay
+            if (
+                self.ui.showSegmentationDebugCheckBox.isChecked()
+                and self.segmentation_debug
+            ):
+                sd = self.segmentation_debug
+
+                # 1. Semi-transparent mask overlay (light blue at 40% opacity)
+                mask = sd.mask.astype(np.uint8) * 255
+                mask_h, mask_w = mask.shape
+                mask_rgba = np.zeros((mask_h, mask_w, 4), dtype=np.uint8)
+                mask_rgba[mask > 0, 0] = 100  # R
+                mask_rgba[mask > 0, 1] = 180  # G
+                mask_rgba[mask > 0, 2] = 255  # B
+                mask_rgba[mask > 0, 3] = 100  # alpha ~40%
+                mask_qimage = QtGui.QImage(
+                    mask_rgba.data,
+                    mask_w,
+                    mask_h,
+                    mask_w * 4,
+                    QtGui.QImage.Format_RGBA8888,
+                )
+                scaled_mask = mask_qimage.scaled(
+                    img_w, img_h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation
+                )
+                painter.setCompositionMode(QtGui.QPainter.CompositionMode_SourceOver)
+                painter.drawImage(0, 0, scaled_mask)
+
+                # 1b. Semi-transparent skin mask overlay (green at 40%)
+                if sd.skin_mask is not None:
+                    smask = sd.skin_mask.astype(np.uint8) * 255
+                    smask_h, smask_w = smask.shape
+                    smask_rgba = np.zeros((smask_h, smask_w, 4), dtype=np.uint8)
+                    smask_rgba[smask > 0, 0] = 50  # R
+                    smask_rgba[smask > 0, 1] = 255  # G
+                    smask_rgba[smask > 0, 2] = 50  # B
+                    smask_rgba[smask > 0, 3] = 80  # alpha ~30%
+                    smask_qimage = QtGui.QImage(
+                        smask_rgba.data,
+                        smask_w,
+                        smask_h,
+                        smask_w * 4,
+                        QtGui.QImage.Format_RGBA8888,
+                    )
+                    scaled_smask = smask_qimage.scaled(
+                        img_w,
+                        img_h,
+                        Qt.IgnoreAspectRatio,
+                        Qt.SmoothTransformation,
+                    )
+                    painter.drawImage(0, 0, scaled_smask)
+
+                # 2. Width profile edges (left/right silhouette in cyan)
+                if sd.width_profile is not None and len(sd.width_profile) > 0:
+                    # Recompute left/right edges from mask within ROI
+                    roi_top = sd.roi_top
+                    roi_h = len(sd.width_profile)
+                    roi_mask = sd.mask[roi_top : roi_top + roi_h]
+                    edge_pen = QtGui.QPen(QColor(0, 255, 255, 180), 1)
+                    painter.setPen(edge_pen)
+                    painter.setBrush(Qt.NoBrush)
+                    prev_left = prev_right = None
+                    for row_idx in range(roi_h):
+                        row_pixels = np.where(roi_mask[row_idx])[0]
+                        if len(row_pixels) == 0:
+                            prev_left = prev_right = None
+                            continue
+                        left_x = float(row_pixels[0])
+                        right_x = float(row_pixels[-1])
+                        abs_y = roi_top + row_idx
+                        lx, ly = translate_coordinates_to_other_image(
+                            (left_x, abs_y), self.image.size, (img_w, img_h)
+                        )
+                        rx, ry = translate_coordinates_to_other_image(
+                            (right_x, abs_y), self.image.size, (img_w, img_h)
+                        )
+                        if prev_left is not None:
+                            painter.drawLine(
+                                QPoint(int(prev_left[0]), int(prev_left[1])),
+                                QPoint(int(lx), int(ly)),
+                            )
+                            painter.drawLine(
+                                QPoint(int(prev_right[0]), int(prev_right[1])),
+                                QPoint(int(rx), int(ry)),
+                            )
+                        prev_left = (lx, ly)
+                        prev_right = (rx, ry)
+
+                # 3. Neck line (yellow-green dashed)
+                print(
+                    f"Segmentation debug draw: neck_y={sd.neck_y}, "
+                    f"chin_y={sd.chin_y}, midline_x={sd.midline_x}, "
+                    f"image.size={self.image.size}, display=({img_w},{img_h})"
+                )
+                if sd.neck_y is not None:
+                    _, ny = translate_coordinates_to_other_image(
+                        (0, sd.neck_y), self.image.size, (img_w, img_h)
+                    )
+                    neck_pen = QtGui.QPen(QColor(180, 255, 0, 200), 2, Qt.DashLine)
+                    painter.setPen(neck_pen)
+                    painter.drawLine(0, int(ny), img_w, int(ny))
+                    painter.setPen(QColor(180, 255, 0))
+                    font = painter.font()
+                    font.setPointSize(9)
+                    painter.setFont(font)
+                    painter.drawText(5, int(ny) - 4, "neck")
+
+                # 4. Chin line (yellow dashed)
+                if sd.chin_y is not None:
+                    _, cy = translate_coordinates_to_other_image(
+                        (0, sd.chin_y), self.image.size, (img_w, img_h)
+                    )
+                    chin_pen = QtGui.QPen(QColor(255, 255, 0, 200), 2, Qt.DashLine)
+                    painter.setPen(chin_pen)
+                    painter.drawLine(0, int(cy), img_w, int(cy))
+                    painter.setPen(QColor(255, 255, 0))
+                    font = painter.font()
+                    font.setPointSize(9)
+                    painter.setFont(font)
+                    painter.drawText(5, int(cy) - 4, "chin")
+
+                # 5. Shoulder line (orange dashed)
+                if sd.shoulder_y is not None:
+                    _, sy = translate_coordinates_to_other_image(
+                        (0, sd.shoulder_y), self.image.size, (img_w, img_h)
+                    )
+                    shoulder_pen = QtGui.QPen(QColor(255, 165, 0, 200), 2, Qt.DashLine)
+                    painter.setPen(shoulder_pen)
+                    painter.drawLine(0, int(sy), img_w, int(sy))
+                    painter.setPen(QColor(255, 165, 0))
+                    font = painter.font()
+                    font.setPointSize(9)
+                    painter.setFont(font)
+                    painter.drawText(5, int(sy) - 4, "shoulder")
+
+                # 5b. Ear/jaw level line (magenta dashed)
+                if hasattr(sd, "ear_y") and sd.ear_y is not None:
+                    _, ey = translate_coordinates_to_other_image(
+                        (0, sd.ear_y), self.image.size, (img_w, img_h)
+                    )
+                    ear_pen = QtGui.QPen(QColor(255, 0, 255, 200), 2, Qt.DashLine)
+                    painter.setPen(ear_pen)
+                    painter.drawLine(0, int(ey), img_w, int(ey))
+                    painter.setPen(QColor(255, 0, 255))
+                    font = painter.font()
+                    font.setPointSize(9)
+                    painter.setFont(font)
+                    painter.drawText(5, int(ey) - 4, "ear/jaw")
+
+                # 6. ROI search band boundaries (faint lines at 25% and 75%)
+                if sd.width_profile is not None and len(sd.width_profile) > 0:
+                    roi_h = len(sd.width_profile)
+                    band_25_y = sd.roi_top + int(roi_h * 0.25)
+                    band_75_y = sd.roi_top + int(roi_h * 0.75)
+                    band_pen = QtGui.QPen(QColor(255, 255, 255, 80), 1, Qt.DotLine)
+                    painter.setPen(band_pen)
+                    for band_y in (band_25_y, band_75_y):
+                        _, by = translate_coordinates_to_other_image(
+                            (0, band_y), self.image.size, (img_w, img_h)
+                        )
+                        painter.drawLine(0, int(by), img_w, int(by))
+
+                painter.setBrush(Qt.NoBrush)
 
             painter.setPen(QColor(0, 0, 255, 127))
 
@@ -763,14 +1028,14 @@ class MainWindow(UILoaderMixin, QMainWindow):
                     point_beg = p1
                     point_end = p2
 
-                for pixels in interpolate_pixels_along_line(
-                    point_beg.x(), 0, 0, point_end.x(), 639, 0
+                for x, y in interpolate_pixels_along_line(
+                    point_beg.x(), 0, point_end.x(), 639
                 ):
                     painter.drawLine(
                         0,
-                        pixels[1],
-                        self.get_depthmap_value(pixels[0], pixels[1]),
-                        pixels[1],
+                        y,
+                        self.get_depthmap_value(x, y),
+                        y,
                     )
 
                 if self.last_click_x is not None:
@@ -785,11 +1050,32 @@ class MainWindow(UILoaderMixin, QMainWindow):
                     )
 
                     values = []
-                    for pixels in interpolate_pixels_along_line(
-                        mouse_x, mouse_y, 0, self.last_click_x, self.last_click_y, 0
+                    for x, y in interpolate_pixels_along_line(
+                        mouse_x, mouse_y, self.last_click_x, self.last_click_y
                     ):
-                        values.append(self.get_depthmap_value(pixels[0], pixels[1]))
+                        values.append(self.get_depthmap_value(x, y))
                     self.paintReconstruction(values)
+
+                # Draw chin and neck midpoint horizontal markers (extended neck only)
+                if (
+                    self.neck_midpoint
+                    and self.neck_midpoint.x is not None
+                    and self.neck_midpoint.pose == PortraitPose.EXTENDED_NECK
+                ):
+                    pink_pen = QtGui.QPen(QColor(255, 105, 180, 200), 1)
+                    painter.setPen(pink_pen)
+                    _, chin_dy = translate_coordinates_to_other_image(
+                        self.neck_midpoint.chin,
+                        self.image.size,
+                        (img_w, img_h),
+                    )
+                    _, neck_dy = translate_coordinates_to_other_image(
+                        (self.neck_midpoint.x, self.neck_midpoint.y),
+                        self.image.size,
+                        (img_w, img_h),
+                    )
+                    painter.drawLine(0, int(chin_dy), 255, int(chin_dy))
+                    painter.drawLine(0, int(neck_dy), 255, int(neck_dy))
         finally:
             painter.end()
         self.ui.chartLabel.setPixmap(canvas)
@@ -844,122 +1130,119 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 self.last_5_distances_vect = self.last_5_distances_vect[1:6]
 
             self.ui.dataOutputEdit.clear()
-            txt = dedent(
-                f"""
-            Depth map coords: {mouse_x, mouse_y}
+            pose_label = (
+                self.neck_midpoint.pose.value.upper()
+                if self.neck_midpoint
+                else "UNKNOWN"
+            )
+            txt = f"*** {pose_label} ***\n\n"
+            txt += dedent(
+                f"""\
+            Single click:
+              Depth map coords: {mouse_x, mouse_y}
+              Depth map value: {closeness}
+              Distance from camera: {depth_mm:.2f} cm
 
-            Depth map raw data: {closeness} (Δ: {closeness_delta})
+            Last two clicks:
+              Delta: {closeness_delta} pixels, {closeness_delta_mm:.1f} cm
+              Line length (2D): {line_len:.2f} px
+              Vector length (3D): {vector_length_3d / 10.0:.2f} cm
+              Surface length (3D): {(surface_length_3d / 10.0):.2f} cm
 
-            Depth map distance:
-            {depth_mm:.2f} cm (Δ: {closeness_delta_mm:.1f} cm)
-
-            Line length (2D, on flat picture):
-            {line_len:.2f} pixels
-
-            Vector length (3D) with depth:
-            {vector_length_3d / 10.0:.2f} cm
-
-            Sum of last 5 3D vector lengths:
-            {sum(self.last_5_distances_vect) / 10.0:.2f} cm
-            {[f"{x:.2f}" for x in self.last_5_distances_vect]}
-
-            Vector length (3D) on surface:
-            {(surface_length_3d / 10.0):.2f} cm
-
-            Sum of last 5 3D surface vector lengths:
-            {sum(self.last_5_distances_srfc) / 10.0:.2f} cm
-            {[f"{x:.2f}" for x in self.last_5_distances_srfc]}
+            Last 5 clicks:
+              Sum vector length (3D): {sum(self.last_5_distances_vect) / 10.0:.2f} cm
+              Sum surface length (3D): {sum(self.last_5_distances_srfc) / 10.0:.2f} cm\
             """
             )
 
-            if self.portrait.teeth_bbox:
-                txt += "\n\nTeeth detected."
-                if self.portrait.incisor_distance:
-                    txt += "\nAutomatic incisor distance (legacy): "
-                    txt += "%.2f cm" % (
-                        self.vector_length_between_two_clicks(
-                            *auto_id_click_1, *auto_id_click_2
-                        )
-                        / 10.0
-                    )
-                im = self.portrait.incisor_measurement
-                if im and im.distance_3d_mm is not None:
-                    txt += (
-                        "\nAutomatic incisor distance"
-                        " (centroid): "
-                    )
-                    txt += "%.2f cm" % (
-                        im.distance_3d_mm / 10.0
-                    )
+            # Gate measurement display by pose
+            pose = self.neck_midpoint.pose if self.neck_midpoint else None
 
-            if self.neck_measurement_auto:
-                nma = self.neck_measurement_auto
-                txt += (
-                    "\n\nAutomatic neck circumference"
-                    " (3D arc): "
-                )
-                txt += "%.2f cm" % (
-                    nma.circumference_mm / 10.0
-                )
-                txt += "\n  Front arc: %.2f mm" % (
-                    nma.front_arc_length_mm
-                )
-                txt += "\n  Multiplier: %.1f" % (
-                    nma.circumference_multiplier
-                )
-                txt += "\n  Arc points: %d" % len(
-                    nma.arc_points_photo
-                )
-
-            if (
-                closeness_delta_mm is not None
-                and vector_length_3d is not None
-                and vector_length_3d > 0.0
-            ):
-                try:
-                    txt += "\n\nAngle for last 2 clicks:\n%.2f°" % math.degrees(
-                        math.acos(abs(closeness_delta_mm / (vector_length_3d / 10.0)))
-                    )
-                except ValueError:
-                    pass
-
-                txt += (
-                    "\n\nNeck circumference estimation"
-                    " for last 2 clicks"
-                    " (equilateral triangle): %.2f"
-                    % (
-                        get_circumference_of_circle(
-                            get_radius_of_circle_described_on_equilateral(
-                                vector_length_3d
+            if pose == PortraitPose.OPEN_MOUTH:
+                if self.portrait.teeth_bbox:
+                    txt += "\n\nTeeth detected."
+                    if self.portrait.incisor_distance:
+                        txt += "\nAutomatic incisor distance (legacy): "
+                        txt += "%.2f cm" % (
+                            self.vector_length_between_two_clicks(
+                                *auto_id_click_1, *auto_id_click_2
                             )
+                            / 10.0
                         )
-                        / 10.0
-                    )
-                )
+                    im = self.portrait.incisor_measurement
+                    if im and im.distance_3d_mm is not None:
+                        txt += "\nAutomatic incisor distance (centroid): "
+                        txt += "%.2f cm" % (im.distance_3d_mm / 10.0)
+                if (
+                    self.mouth_measurement
+                    and self.mouth_measurement.distance_3d_mm is not None
+                ):
+                    txt += "\n\n[FaceMesh] Mouth opening: "
+                    txt += "%.2f cm" % (self.mouth_measurement.distance_3d_mm / 10.0)
 
-                txt += (
-                    "\n\nNeck circumference estimation"
-                    " for last 2 clicks"
-                    " (radius): %.2f"
-                    % (
-                        get_circumference_of_circle(
-                            vector_length_3d
-                        )
-                        / 10.0
-                    )
-                )
+            elif pose == PortraitPose.NEUTRAL_NECK:
+                if self.neck_measurement_auto:
+                    nma = self.neck_measurement_auto
+                    txt += "\n\nAutomatic neck circumference (3D arc): "
+                    txt += f"{nma.circumference_mm / 10.0:.2f} cm"
+                    txt += f"\n  Front arc: {nma.front_arc_length_mm:.2f} mm"
+                    txt += f"\n  Multiplier: {nma.circumference_multiplier:.1f}"
+                    txt += f"\n  Arc points: {len(nma.arc_points_photo):d}"
 
-                txt += (
-                    "\n\nNeck circumference estimation"
-                    " for last 2 clicks"
-                    " (square): %.2f"
-                    % (
-                        get_circumference_of_circle(
-                            get_radius_of_circle_described_on_square(vector_length_3d)
-                        )
-                        / 10.0
+                    # Neck circumference approximation from diameter (left_x → right_x) * pi
+                    left_display = translate_coordinates_to_other_image(
+                        (nma.left_x, nma.neck_y),
+                        self.portrait.skinmap.size,
+                        (const.MAIN_IMAGE_WIDTH, const.MAIN_IMAGE_HEIGHT),
                     )
-                )
+                    right_display = translate_coordinates_to_other_image(
+                        (nma.right_x, nma.neck_y),
+                        self.portrait.skinmap.size,
+                        (const.MAIN_IMAGE_WIDTH, const.MAIN_IMAGE_HEIGHT),
+                    )
+                    diameter_mm = self.vector_length_between_two_clicks(
+                        *left_display, *right_display
+                    )
+                    circumference_from_radius = diameter_mm * math.pi
+                    txt += (
+                        "\n\nNeck approximation from radius:"
+                        f" {circumference_from_radius / 10.0:.2f} cm"
+                        f"\n  Diameter (3D): {diameter_mm / 10.0:.2f} cm"
+                    )
+
+                if self.portrait.teethmap:
+                    teeth_bin = self.portrait.teethmap.point(
+                        lambda v: 255 if v > 30 else 0
+                    )
+                    bbox = teeth_bin.getbbox()
+                    if bbox:
+                        bw = bbox[2] - bbox[0]
+                        bh = bbox[3] - bbox[1]
+                        # Require a meaningful teeth region (at least 20x10 pixels)
+                        if bw >= 20 and bh >= 10:
+                            txt += (
+                                "\n\nMouth closed, neutral neck, teeth visible"
+                                " -- possible positive ULBT test?"
+                                f"\n  Teeth bbox: {bw}x{bh} px"
+                            )
+
+            elif pose == PortraitPose.EXTENDED_NECK:
+                if (
+                    self.segmentation_debug
+                    and self.segmentation_debug.neck_width_front_arc_mm
+                ):
+                    txt += (
+                        f"\n\nNeck width (3D front arc):"
+                        f" {self.segmentation_debug.neck_width_front_arc_mm / 10:.2f} cm"
+                    )
+                    txt += (
+                        f"\nNeck width (3D straight):"
+                        f" {self.segmentation_debug.neck_width_straight_mm / 10:.2f} cm"
+                    )
+
+            if self.tmd_mm is not None:
+                txt += f"\n\nThyromental distance (3D): {self.tmd_mm / 10.0:.2f} cm"
+
             # Portrait picture
 
             # Try neck measurement
@@ -985,9 +1268,10 @@ class MainWindow(UILoaderMixin, QMainWindow):
         )
 
     def click_to_3d(self, x, y):
-        z = self.distance_for_click(x, y)
-        x, y = self.translate_click_to_mm(z, x, y)
-        return x, y, z
+        z_cm = self.distance_for_click(x, y)
+        x, y = self.translate_click_to_mm(z_cm, x, y)
+        z_mm = z_cm * 10
+        return x, y, z_mm
 
     def vector_length_surface(
         self,
@@ -998,21 +1282,17 @@ class MainWindow(UILoaderMixin, QMainWindow):
     ):
         """Calculate length iterating over the surface of 3D data"""
 
-        z1 = self.get_depthmap_value(mouse_x, mouse_y)
-        z2 = self.get_depthmap_value(last_click_x, last_click_y)
         pixels = list(
-            interpolate_pixels_along_line(
-                mouse_x, mouse_y, z1, last_click_x, last_click_y, z2
-            )
+            interpolate_pixels_along_line(mouse_x, mouse_y, last_click_x, last_click_y)
         )
         s = []
 
-        for (x1, y1, z1), (x2, y2, z2) in zip(pixels, pixels[1:]):
-            z1 = self.distance_for_click(x1, y1)
-            x1, y1 = self.translate_click_to_mm(z1, x1, y1)
+        for (x1, y1), (x2, y2) in zip(pixels, pixels[1:], strict=False):
+            z1 = self.distance_for_click(x1, y1) * 10  # cm → mm
+            x1, y1 = self.translate_click_to_mm(z1 / 10, x1, y1)
 
-            z2 = self.distance_for_click(x2, y2)
-            x2, y2 = self.translate_click_to_mm(z2, x2, y2)
+            z2 = self.distance_for_click(x2, y2) * 10  # cm → mm
+            x2, y2 = self.translate_click_to_mm(z2 / 10, x2, y2)
 
             line_len_3d = self.vector_length_simple(x1, y1, z1, x2, y2, z2)
             s.append(line_len_3d)
@@ -1026,20 +1306,20 @@ class MainWindow(UILoaderMixin, QMainWindow):
         z1 = self.get_depthmap_value(x1, y1)
         z2 = self.get_depthmap_value(x2, y2)
 
-        distance_z1 = self.get_depthmap_distance(z1)
-        distance_z2 = self.get_depthmap_distance(z2)
+        distance_z1 = self.get_depthmap_distance(z1) * 10  # cm → mm
+        distance_z2 = self.get_depthmap_distance(z2) * 10  # cm → mm
 
         distance_x1, distance_y1 = self.translate_click_to_mm(
-            distance_z1,
+            distance_z1 / 10,
             x1,
             y1,
         )
         distance_x2, distance_y2 = self.translate_click_to_mm(
-            distance_z2,
+            distance_z2 / 10,
             x2,
             y2,
         )
-        args = (
+        return self.vector_length_simple(
             distance_x1,
             distance_y1,
             distance_z1,
@@ -1047,7 +1327,6 @@ class MainWindow(UILoaderMixin, QMainWindow):
             distance_y2,
             distance_z2,
         )
-        return self.vector_length_simple(*args)
 
     def calculate_line_length(self, dist_x, dist_y):
         line_len = math.sqrt(abs(dist_x * dist_x) + abs(dist_y * dist_y))
@@ -1109,102 +1388,160 @@ class MainWindow(UILoaderMixin, QMainWindow):
             return
 
         except UnknownExtension as e:
-            self.critical_error(QObject.tr("Unknown file extension (%s)" % e))
+            self.critical_error(QObject.tr(f"Unknown file extension ({e})"))
             return
 
         self.smallImage = self.image.resize(
             (const.MAIN_IMAGE_WIDTH, const.MAIN_IMAGE_HEIGHT)
         )
 
-        #
-        # Get face position, if any:
-        #
+        self._build_hairless_depth_image()
 
+        self._run_detection_and_update(force_extended=False)
+
+    def _run_detection_and_update(self, force_extended=False):
+        """Run face/neck detection and update UI accordingly.
+
+        When force_extended is True, skip MediaPipe and use only the
+        segmentation/depth-based extended neck analysis.
+        """
         self.neck_measurement_auto = None
         self.neck_midpoint = None
         self.mediapipe_debug = None
-        self.face_proper = False
+        self.face_mesh_debug = None
+        self.tmd_mm = None
+        self.mouth_measurement = None
+        self.segmentation_debug = None
 
-        # Always detect standalone eyes — used as fallback for neck search
-        # when face has <2 eyes, and for drawing when face is absent.
-        self.standalone_eyes = detect_eyes(self.image)
         img_w = self.image.size[0]
 
-        try:
-            self.face = get_face_parameters(self.image, raise_opencv_exceptions=True)
-        except NoFacesDetected:
-            self.face = None
-            if not self.standalone_eyes:
-                self.critical_error(errors.FACE_NOT_DETECTED)
-
-        except MultipleFacesDetected:
-            self.critical_error(errors.MULTIPLE_FACES_DETECTED)
-
-        except Exception:
-            tb_text = traceback.format_exc()
-            self.critical_error(f"Exception: {tb_text}")
-            print(tb_text)
-
-        else:
-            percent_width, percent_height = self.face.calculate_percentage_of_image()
-            if (
-                percent_width < const.MINIMUM_FACE_WIDTH_PERCENT
-                or percent_height < const.MINIMUM_FACE_HEIGHT_PERCENT
-            ):
-                self.critical_error(
-                    errors.FACE_TOO_SMALL.format(
-                        percent_width=percent_width * 100,
-                        percent_height=percent_height * 100,
-                        minimum_width=const.MINIMUM_FACE_WIDTH_PERCENT * 100,
-                        minimum_height=const.MINIMUM_FACE_HEIGHT_PERCENT * 100,
-                    )
+        if not force_extended:
+            # Detect MediaPipe pose landmarks (mouth + shoulders -> search bounds)
+            try:
+                self.neck_midpoint, self.mediapipe_debug, self.face_mesh_debug = (
+                    detect_neck_midpoint(self.image)
                 )
-            else:
-                self.face_proper = True
-
-            # Set lower point somewhere around mouth (below nose, above chin)
-
-            self.ui.xValue.setValue(
-                int(
-                    round(
-                        self.face.center_x
-                        / self.image.size[0]
-                        * (const.MAIN_IMAGE_WIDTH - 1)
-                    )
-                )
-            )
-            self.ui.yValue.setValue(
-                int(
-                    round(
-                        (self.face.center_y + self.face.height / 4)
-                        / self.image.size[1]
-                        * (const.MAIN_IMAGE_HEIGHT - 1)
-                    )
-                )
-            )
-
-        # Detect MediaPipe pose landmarks (mouth + shoulders → search bounds)
-        try:
-            result = detect_neck_midpoint(self.image)
-            if result:
-                self.neck_midpoint, self.mediapipe_debug = result
-                print(f"Neck midpoint detected: {self.neck_midpoint}")
-                print(f"  x={self.neck_midpoint.x}, y={self.neck_midpoint.y}")
-            else:
+                if self.neck_midpoint:
+                    print(f"Neck midpoint detected: {self.neck_midpoint}")
+                    print(f"  x={self.neck_midpoint.x}, y={self.neck_midpoint.y}")
+            except Exception as e:
+                print(f"detect_neck_midpoint failed: {type(e).__name__}: {e}")
                 self.neck_midpoint = None
                 self.mediapipe_debug = None
-        except Exception as e:
-            print(f"detect_neck_midpoint failed: {type(e).__name__}: {e}")
-            self.neck_midpoint = None
-            self.mediapipe_debug = None
+                self.face_mesh_debug = None
 
-        # Compute MediaPipe search bounds: mouth → neck midpoint.
+        if not self.neck_midpoint:
+            try:
+                from portrait_analyser.extended_neck import (
+                    detect_neck_midpoint_from_dual_mask,
+                    detect_neck_midpoint_from_segmentation,
+                )
+
+                if (
+                    self.portrait.skinmap is not None
+                    and self.portrait.depthmap is not None
+                ):
+                    self.neck_midpoint, self.segmentation_debug = (
+                        detect_neck_midpoint_from_dual_mask(
+                            self.image,
+                            self.portrait.skinmap,
+                            self.portrait.depthmap,
+                            hairmap=self.portrait.hairmap,
+                            float_min=self.float_min_value,
+                            float_max=self.float_max_value,
+                        )
+                    )
+
+                if not self.neck_midpoint:
+                    self.neck_midpoint, self.segmentation_debug = (
+                        detect_neck_midpoint_from_segmentation(self.image)
+                    )
+            except Exception as e:
+                print(f"Segmentation fallback failed: {e}")
+
+        if not self.neck_midpoint:
+            self.critical_error(errors.FACE_NOT_DETECTED)
+
+        if self.neck_midpoint:
+            pose = self.neck_midpoint.pose
+
+            neck_arc_available = pose == PortraitPose.NEUTRAL_NECK
+            self.ui.showNeckArcCheckBox.setEnabled(neck_arc_available)
+            self.ui.showNeckArcCheckBox.setChecked(neck_arc_available)
+            self.ui.showNeckArcCheckBox.setToolTip(
+                "" if neck_arc_available else "Neck arc is only available for neutral neck pose"
+            )
+
+            centroids_available = pose == PortraitPose.OPEN_MOUTH
+            self.ui.showCentroidsCheckBox.setEnabled(centroids_available)
+            self.ui.showCentroidsCheckBox.setChecked(centroids_available)
+            self.ui.showCentroidsCheckBox.setToolTip(
+                "" if centroids_available else "Teeth centroids are only available for open mouth pose"
+            )
+        else:
+            self.ui.showNeckArcCheckBox.setEnabled(False)
+            self.ui.showNeckArcCheckBox.setChecked(False)
+            self.ui.showNeckArcCheckBox.setToolTip("No face/pose detected in this picture")
+
+            self.ui.showCentroidsCheckBox.setEnabled(False)
+            self.ui.showCentroidsCheckBox.setChecked(False)
+            self.ui.showCentroidsCheckBox.setToolTip("No face/pose detected in this picture")
+
+        # Enable/disable debug checkboxes based on available data
+        has_pose = self.mediapipe_debug is not None
+        self.ui.showMediaPipeLandmarksCheckBox.setEnabled(has_pose)
+        if not has_pose:
+            self.ui.showMediaPipeLandmarksCheckBox.setChecked(False)
+            self.ui.showMediaPipeLandmarksCheckBox.setToolTip(
+                "Pose landmarks were not detected in this picture"
+            )
+        else:
+            self.ui.showMediaPipeLandmarksCheckBox.setToolTip("")
+
+        has_face_mesh = self.face_mesh_debug is not None
+        self.ui.showFaceMeshLandmarksCheckBox.setEnabled(has_face_mesh)
+        if not has_face_mesh:
+            self.ui.showFaceMeshLandmarksCheckBox.setChecked(False)
+            self.ui.showFaceMeshLandmarksCheckBox.setToolTip(
+                "FaceMesh data were not detected in this picture"
+            )
+        else:
+            self.ui.showFaceMeshLandmarksCheckBox.setToolTip("")
+
+        has_segmentation = self.segmentation_debug is not None
+        self.ui.showSegmentationDebugCheckBox.setEnabled(has_segmentation)
+        if not has_segmentation:
+            self.ui.showSegmentationDebugCheckBox.setChecked(False)
+            self.ui.showSegmentationDebugCheckBox.setToolTip(
+                "Segmentation data were not detected in this picture"
+            )
+        else:
+            self.ui.showSegmentationDebugCheckBox.setToolTip("")
+
+        # Enable the force button now that an image is loaded
+        self.ui.forceExtendedNeckButton.setEnabled(True)
+
+        # Set initial measurement point from MediaPipe nose/mouth
+        if self.neck_midpoint:
+            nose_x, nose_y = self.neck_midpoint.nose
+            self.ui.xValue.setValue(
+                int(round(nose_x / self.image.size[0] * (const.MAIN_IMAGE_WIDTH - 1)))
+            )
+            mouth_y = max(
+                self.neck_midpoint.mouth_left[1],
+                self.neck_midpoint.mouth_right[1],
+            )
+            self.ui.yValue.setValue(
+                int(round(mouth_y / self.image.size[1] * (const.MAIN_IMAGE_HEIGHT - 1)))
+            )
+
+        # Compute MediaPipe search bounds: mouth -> neck midpoint.
         # The narrowest neck is between the chin and mid-cervical level,
         # NOT between mouth and shoulders (that range includes the collar
-        # line where skin disappears — the global minimum, not the neck).
+        # line where skin disappears -- the global minimum, not the neck).
         scan_start_y = None
         scan_end_y = None
-        if self.neck_midpoint:
+        if self.neck_midpoint and self.neck_midpoint.y is not None:
             mouth_y = max(
                 self.neck_midpoint.mouth_left[1],
                 self.neck_midpoint.mouth_right[1],
@@ -1212,9 +1549,12 @@ class MainWindow(UILoaderMixin, QMainWindow):
             scan_start_y = round(mouth_y)
             scan_end_y = round(self.neck_midpoint.y)
 
-        has_eyes = len(self.standalone_eyes) >= 2
-        if self.portrait.skinmap and self.portrait.depthmap and (
-            self.face_proper or has_eyes
+        if (
+            self.portrait.skinmap
+            and self.portrait.depthmap
+            and self.neck_midpoint
+            and self.neck_midpoint.x is not None
+            and self.neck_midpoint.pose == PortraitPose.NEUTRAL_NECK
         ):
             self.neck_measurement_auto = compute_neck_circumference(
                 skinmap=self.portrait.skinmap,
@@ -1223,22 +1563,97 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 photo_height=self.image.size[1],
                 float_min=self.portrait.floatValueMin,
                 float_max=self.portrait.floatValueMax,
-                face_location=self.face,
-                eyes=self.standalone_eyes,
-                image_width=img_w,
                 scan_start_y=scan_start_y,
                 scan_end_y=scan_end_y,
-                neck_midpoint_y=(
-                    self.neck_midpoint.y
-                    if self.neck_midpoint
-                    else None
-                ),
+                neck_midpoint_y=self.neck_midpoint.y,
+                circumference_multiplier=2.7,
+                n_samples=10,
             )
+
+        # Compute thyromental distance (chin -> neck midpoint)
+        if (
+            self.neck_midpoint
+            and self.portrait.depthmap
+            and self.neck_midpoint.x is not None
+            and self.neck_midpoint.pose
+            in (PortraitPose.EXTENDED_NECK, PortraitPose.NEUTRAL_NECK)
+        ):
+            chin_x, chin_y = self.neck_midpoint.chin
+            neck_x, neck_y = self.neck_midpoint.x, self.neck_midpoint.y
+            dm_w, dm_h = self.portrait.depthmap.size
+            ph_w, ph_h = self.image.size
+            # Translate photo-space coords to depthmap-space for depth sampling
+            chin_dm = translate_coordinates_to_other_image(
+                (chin_x, chin_y), (ph_w, ph_h), (dm_w, dm_h)
+            )
+            neck_dm = translate_coordinates_to_other_image(
+                (neck_x, neck_y), (ph_w, ph_h), (dm_w, dm_h)
+            )
+            chin_depth = self.portrait.depthmap.getpixel(
+                (
+                    int(clamp(chin_dm[0], 0, dm_w - 1)),
+                    int(clamp(chin_dm[1], 0, dm_h - 1)),
+                )
+            )[0]
+            neck_depth = self.portrait.depthmap.getpixel(
+                (
+                    int(clamp(neck_dm[0], 0, dm_w - 1)),
+                    int(clamp(neck_dm[1], 0, dm_h - 1)),
+                )
+            )[0]
+            tmd_result = compute_tmd_3d(
+                chin_coord=(chin_x, chin_y),
+                neck_coord=(neck_x, neck_y),
+                chin_depth_raw=chin_depth,
+                neck_depth_raw=neck_depth,
+                float_min=self.portrait.floatValueMin,
+                float_max=self.portrait.floatValueMax,
+            )
+            if tmd_result:
+                self.tmd_mm = tmd_result[0]
+                print(f"TMD (3D): {self.tmd_mm / 10:.2f} cm")
+            else:
+                print("TMD computation failed (depth unavailable)")
+
+        # FaceMesh mouth opening fallback: when pose is OPEN_MOUTH but
+        # teethmap-based incisor detection failed (e.g. no upper teeth)
+        if (
+            self.neck_midpoint
+            and self.neck_midpoint.pose == PortraitPose.OPEN_MOUTH
+            and self.portrait.incisor_measurement is None
+            and self.face_mesh_debug
+            and self.portrait.depthmap
+        ):
+            self.mouth_measurement = compute_mouth_measurement_from_facemesh(
+                landmarks=self.face_mesh_debug.landmarks,
+                depthmap=self.portrait.depthmap,
+                photo_w=self.image.size[0],
+                photo_h=self.image.size[1],
+                float_min=self.portrait.floatValueMin,
+                float_max=self.portrait.floatValueMax,
+            )
+            if (
+                self.mouth_measurement
+                and self.mouth_measurement.distance_3d_mm is not None
+            ):
+                print(
+                    f"FaceMesh mouth opening (3D): "
+                    f"{self.mouth_measurement.distance_3d_mm / 10:.2f} cm"
+                )
+            else:
+                print("FaceMesh mouth measurement: depth conversion failed")
 
         self.last_click_y = self.last_click_x = None
         self.last_clicks = []
         self.redrawImage()
         self.updateWindowTitle()
+
+    def forceExtendedNeckAnalysis(self):
+        """Re-run detection using only segmentation/depth method, skipping MediaPipe."""
+        if not hasattr(self, "image") or self.image is None:
+            return
+        print("--- Force extended neck analysis ---")
+        self._run_detection_and_update(force_extended=True)
 
     def getWindowTitle(self, fileName=None, fun=None):
         ret = "FIDMAA GUI"
@@ -1336,6 +1751,9 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.ui.showCentroidsCheckBox.stateChanged.connect(self.redrawImage)
         self.ui.showNeckArcCheckBox.stateChanged.connect(self.redrawImage)
         self.ui.showMediaPipeLandmarksCheckBox.stateChanged.connect(self.redrawImage)
+        self.ui.showFaceMeshLandmarksCheckBox.stateChanged.connect(self.redrawImage)
+        self.ui.showSegmentationDebugCheckBox.stateChanged.connect(self.redrawImage)
+        self.ui.forceExtendedNeckButton.clicked.connect(self.forceExtendedNeckAnalysis)
 
         self.ui.angleValue.setValue(90)
         self.ui.angleSlider.setValue(90)
