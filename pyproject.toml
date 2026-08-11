@@ -46,7 +46,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "pyinstaller>=5.6.2,<6",
+    "pyinstaller>=6.11,<7",
     "ipdb>=0.13.13,<0.14",
     "pytest>=7.0,<9",
 ]

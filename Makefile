@@ -13,14 +13,20 @@ clean:
 macos: macos-build macos-copy-files
 
 macos-build:
-	pyinstaller fidmaa_gui.spec
+	uv run pyinstaller fidmaa_gui.spec
 
-VENV_PATH=$(shell python -c "import sys; print(sys.prefix)")
+# Bare `python` resolves to whatever is first on PATH, not this project's
+# interpreter, so ask uv where the environment actually is.
+VENV_PATH=$(shell uv run python -c "import sys; print(sys.prefix)")
+# PyInstaller 6 collects packages into Contents/Frameworks; Contents/MacOS
+# holds only the executable.
+BUNDLE_LIBS=dist/fidmaa_gui.app/Contents/Frameworks
 
 macos-copy-files:
-	cp -R $(VENV_PATH)/lib/python3*/site-packages/cv2/data/ ./dist/fidmaa_gui.app/Contents/MacOS/cv2/data/
-	mkdir -p dist/fidmaa_gui.app/Contents/MacOS/pyheif/data/
-	cp -R $(VENV_PATH)/lib/python3*/site-packages/pyheif/data/ ./dist/fidmaa_gui.app/Contents/MacOS/pyheif/data/
+	mkdir -p $(BUNDLE_LIBS)/cv2/data/
+	cp -R $(VENV_PATH)/lib/python3*/site-packages/cv2/data/ $(BUNDLE_LIBS)/cv2/data/
+	mkdir -p $(BUNDLE_LIBS)/pyheif/data/
+	cp -R $(VENV_PATH)/lib/python3*/site-packages/pyheif/data/ $(BUNDLE_LIBS)/pyheif/data/
 
 local-dev:
 	uv sync
