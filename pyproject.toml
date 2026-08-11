@@ -1,13 +1,34 @@
 [project]
 name = "fidmaa-gui"
 version = "0.1.2"
-description = "What's FIDMAA?"
+description = "Desktop app for 3D facial measurements from iPhone TrueDepth portrait photos"
 authors = [
     {name = "Michał Pasternak", email = "michal.dtz@gmail.com"},
 ]
 license = {text = "MIT"}
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
+keywords = [
+    "truedepth",
+    "depth-map",
+    "heic",
+    "anthropometry",
+    "facial-measurement",
+    "portrait",
+    "iphone",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: MacOS X",
+    "Intended Audience :: Healthcare Industry",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Image Processing",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
 dependencies = [
     "PySide6>=6.6.2,<7",
     "Pillow>=10.2.0,<11",
@@ -29,6 +50,12 @@ dev = [
     "ipdb>=0.13.13,<0.14",
     "pytest>=7.0,<9",
 ]
+
+[project.urls]
+Homepage = "https://github.com/fidmaa/fidmaa-gui"
+Repository = "https://github.com/fidmaa/fidmaa-gui"
+Issues = "https://github.com/fidmaa/fidmaa-gui/issues"
+Changelog = "https://github.com/fidmaa/fidmaa-gui/blob/main/CHANGELOG.md"
 
 [project.scripts]
 fidmaa_gui = "fidmaa_gui.entrypoints:run"
