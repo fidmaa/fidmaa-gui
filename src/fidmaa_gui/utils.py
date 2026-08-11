@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Optional
 
 import PySide6
-from PIL import ImageFile
+from PIL import ImageFile, ImageFilter
 from PySide6 import QtGui
 from PySide6.QtCore import QFile, QObject
 from PySide6.QtUiTools import QUiLoader
@@ -63,6 +63,77 @@ def interpolate_pixels_along_line(x1, y1, x2, y2):
         yield (x1, y1)
         x1 += delta_x
         y1 += delta_y
+
+
+def sample_points_along_line(x1, y1, x2, y2, step):
+    """Yield points separated by approximately ``step`` pixels on a 2D line.
+
+    The first and last points are always included and all intervals have equal
+    length.  This also makes the returned set independent of line direction.
+    """
+    if step <= 0:
+        raise ValueError("step must be greater than zero")
+
+    dist_x = x2 - x1
+    dist_y = y2 - y1
+    line_length = math.hypot(dist_x, dist_y)
+
+    if line_length == 0:
+        yield (x1, y1)
+        return
+
+    interval_count = max(1, round(line_length / step))
+    for index in range(interval_count + 1):
+        ratio = index / interval_count
+        yield (x1 + dist_x * ratio, y1 + dist_y * ratio)
+
+
+def median_filter_depthmap(depthmap, size=3):
+    """Return a same-size, single-channel median-filtered depth map."""
+    if size < 3 or size % 2 == 0:
+        raise ValueError("median filter size must be an odd number >= 3")
+    if len(depthmap.getbands()) > 1:
+        depthmap = depthmap.getchannel(0)
+    else:
+        depthmap = depthmap.convert("L")
+    return depthmap.filter(ImageFilter.MedianFilter(size=size))
+
+
+def bilinear_sample(image, x, y, invalid_value=None):
+    """Sample a PIL image at fractional coordinates using bilinear interpolation.
+
+    When ``invalid_value`` is provided, return ``None`` if a contributing pixel
+    has that value.  This prevents interpolation across holes in a depth map.
+    """
+    if image.width == 0 or image.height == 0:
+        return None
+
+    x = min(max(float(x), 0.0), image.width - 1.0)
+    y = min(max(float(y), 0.0), image.height - 1.0)
+    x0 = math.floor(x)
+    y0 = math.floor(y)
+    x1 = min(x0 + 1, image.width - 1)
+    y1 = min(y0 + 1, image.height - 1)
+    fraction_x = x - x0
+    fraction_y = y - y0
+
+    samples = (
+        (image.getpixel((x0, y0)), (1.0 - fraction_x) * (1.0 - fraction_y)),
+        (image.getpixel((x1, y0)), fraction_x * (1.0 - fraction_y)),
+        (image.getpixel((x0, y1)), (1.0 - fraction_x) * fraction_y),
+        (image.getpixel((x1, y1)), fraction_x * fraction_y),
+    )
+
+    weighted_value = 0.0
+    for value, weight in samples:
+        if weight == 0:
+            continue
+        if isinstance(value, tuple):
+            value = value[0]
+        if invalid_value is not None and value == invalid_value:
+            return None
+        weighted_value += value * weight
+    return weighted_value
 
 
 def clamp(n, minn, maxn):

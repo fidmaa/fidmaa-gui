@@ -35,8 +35,11 @@ from . import const, errors
 from .calculations import findPoint
 from .utils import (
     UILoaderMixin,
+    bilinear_sample,
     clamp,
     interpolate_pixels_along_line,
+    median_filter_depthmap,
+    sample_points_along_line,
     translate_coordinates_to_other_image,
 )
 
@@ -65,6 +68,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.smallImage = None
         self.portrait: IOSPortrait = None
         self.depthmap = None
+        self.filtered_depthmap = None
         self.teethmap = None
 
         self.float_max_value = self.float_min_value = None
@@ -1092,6 +1096,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 line_len = self.calculate_line_length(line_x, line_y)
 
             surface_length_3d = vector_length_3d = 0
+            filtered_surface_lengths = {step: 0.0 for step in range(2, 8)}
             if (
                 self.last_click_x != mouse_x or self.last_click_y != mouse_y
             ) and self.last_click_x is not None:
@@ -1102,6 +1107,17 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 surface_length_3d = self.vector_length_surface(
                     mouse_x, mouse_y, self.last_click_x, self.last_click_y
                 )
+
+                filtered_surface_lengths = {
+                    step: self.surface_vector_filtered(
+                        mouse_x,
+                        mouse_y,
+                        self.last_click_x,
+                        self.last_click_y,
+                        step,
+                    )
+                    for step in range(2, 8)
+                }
 
             self.last_click_x = mouse_x
             self.last_click_y = mouse_y
@@ -1148,11 +1164,22 @@ class MainWindow(UILoaderMixin, QMainWindow):
               Line length (2D): {line_len:.2f} px
               Vector length (3D): {vector_length_3d / 10.0:.2f} cm
               Surface length (3D): {(surface_length_3d / 10.0):.2f} cm
-
-            Last 5 clicks:
-              Sum vector length (3D): {sum(self.last_5_distances_vect) / 10.0:.2f} cm
-              Sum surface length (3D): {sum(self.last_5_distances_srfc) / 10.0:.2f} cm\
             """
+            )
+            txt += "\n  Surface vector filtered (median 3x3):"
+            for step, length_mm in filtered_surface_lengths.items():
+                if length_mm is None:
+                    formatted_length = "n/a (invalid depth)"
+                else:
+                    formatted_length = f"{length_mm / 10.0:.2f} cm"
+                txt += f"\n    N={step} px: {formatted_length}"
+            txt += dedent(
+                f"""
+
+                Last 5 clicks:
+                  Sum vector length (3D): {sum(self.last_5_distances_vect) / 10.0:.2f} cm
+                  Sum surface length (3D): {sum(self.last_5_distances_srfc) / 10.0:.2f} cm\
+                """
             )
 
             # Gate measurement display by pose
@@ -1298,6 +1325,59 @@ class MainWindow(UILoaderMixin, QMainWindow):
             s.append(line_len_3d)
         return sum(s)
 
+    def surface_vector_filtered(
+        self,
+        mouse_x,
+        mouse_y,
+        last_click_x,
+        last_click_y,
+        step,
+    ):
+        """Measure a median-filtered surface profile every ``step`` pixels.
+
+        Coordinates between samples are measured in the 480x640 display space.
+        Fractional positions are mapped to the native depth-map resolution and
+        sampled bilinearly.  A zero disparity invalidates the measurement rather
+        than introducing a foreground-to-background depth wall.
+        """
+        if step <= 0:
+            raise ValueError("step must be greater than zero")
+
+        if self.filtered_depthmap is None:
+            self.filtered_depthmap = median_filter_depthmap(self.depthmap, size=3)
+
+        depth_width, depth_height = self.filtered_depthmap.size
+        display_width = const.MAIN_IMAGE_WIDTH
+        display_height = const.MAIN_IMAGE_HEIGHT
+        points_3d = []
+
+        for x, y in sample_points_along_line(
+            mouse_x,
+            mouse_y,
+            last_click_x,
+            last_click_y,
+            step,
+        ):
+            depth_x = x * (depth_width - 1) / (display_width - 1)
+            depth_y = y * (depth_height - 1) / (display_height - 1)
+            raw_depth = bilinear_sample(
+                self.filtered_depthmap,
+                depth_x,
+                depth_y,
+                invalid_value=0,
+            )
+            if raw_depth is None:
+                return None
+
+            z_cm = self.get_depthmap_distance(raw_depth)
+            x_mm, y_mm = self.translate_click_to_mm(z_cm, x, y)
+            points_3d.append((x_mm, y_mm, z_cm * 10))
+
+        return sum(
+            self.vector_length_simple(*point_1, *point_2)
+            for point_1, point_2 in zip(points_3d, points_3d[1:], strict=False)
+        )
+
     def vector_length_simple(self, x1, y1, z1, x2, y2, z2):
         """Simple mathematical lenght of the vector"""
         return math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2 + (z2 - z1) ** 2)
@@ -1365,6 +1445,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
             self.portrait: IOSPortrait = load_image(self.filename, use_exif=False)
             self.image = self.portrait.photo
             self.depthmap = self.portrait.depthmap
+            self.filtered_depthmap = median_filter_depthmap(self.depthmap, size=3)
             self.teethmap = self.portrait.teethmap
             self.float_min_value = self.portrait.floatValueMin
             self.float_max_value = self.portrait.floatValueMax
