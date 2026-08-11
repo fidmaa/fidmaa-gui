@@ -112,6 +112,9 @@ ENV/
 env.bak/
 venv.bak/
 
+# Legacy dependency manager; this project uses uv.lock.
+poetry.lock
+
 # Spyder project settings
 .spyderproject
 .spyproject

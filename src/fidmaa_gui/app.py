@@ -1955,9 +1955,13 @@ class MainWindow(UILoaderMixin, QMainWindow):
               Delta: {closeness_delta} pixels, {closeness_delta_mm:.1f} cm
               Line length (2D): {line_len:.2f} px
               Vector length (3D): {vector_length_3d / 10.0:.2f} cm
-              Surface length (3D): {(surface_length_3d / 10.0):.2f} cm
+              Surface length (3D) [legacy, unfiltered]: {(surface_length_3d / 10.0):.2f} cm
             """)
-            txt += "\n  Surface vector filtered (median 3x3):"
+            # The legacy figure above walks every pixel of the raw depth map, so
+            # it rectifies 8-bit quantisation into length and reads ~10% high.
+            # Kept for comparison only -- the filtered values below are the
+            # measurement.
+            txt += "\n  Surface vector filtered (median 3x3) -- preferred:"
             for step, length_mm in filtered_surface_lengths.items():
                 if length_mm is None:
                     formatted_length = "n/a (invalid depth)"
@@ -1968,7 +1972,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
 
                 Last 5 clicks:
                   Sum vector length (3D): {sum(self.last_5_distances_vect) / 10.0:.2f} cm
-                  Sum surface length (3D): {sum(self.last_5_distances_srfc) / 10.0:.2f} cm\
+                  Sum surface length (3D) [legacy]: {sum(self.last_5_distances_srfc) / 10.0:.2f} cm\
                 """)
 
             # Gate measurement display by pose
@@ -2119,7 +2123,13 @@ class MainWindow(UILoaderMixin, QMainWindow):
         last_click_x,
         last_click_y,
     ):
-        """Calculate length iterating over the surface of 3D data"""
+        """Calculate length iterating over the surface of 3D data.
+
+        Legacy/diagnostic only. Samples every pixel of the raw depth map, so
+        each 8-bit quantisation step is summed as real surface displacement
+        and the result reads roughly 10% high. Use surface_vector_filtered()
+        for measurement; this is kept to show what the filtering removes.
+        """
 
         pixels = list(interpolate_pixels_along_line(mouse_x, mouse_y, last_click_x, last_click_y))
         s = []
