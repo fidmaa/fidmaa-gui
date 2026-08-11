@@ -49,22 +49,46 @@ def render_depth_visualization(
     colored = cv2.cvtColor(colored_bgr, cv2.COLOR_BGR2RGB)
     colored[~valid] = 0
 
-    if contours and min(depth.shape) >= 3:
-        filtered = cv2.medianBlur(depth, 3)
-        contour_pixels = _raw_level_boundaries(filtered, valid)
-        colored[contour_pixels] = (255, 255, 255)
+    if contours:
+        overlay = np.asarray(render_depth_contour_overlay(depthmap, depthmap.size))
+        colored[overlay[..., 3] > 0] = (255, 255, 255)
 
     return DepthVisualization(Image.fromarray(colored, mode="RGB"), low, high)
 
 
+def render_depth_contour_overlay(
+    depthmap: Image.Image,
+    display_size: tuple[int, int],
+) -> Image.Image:
+    """Render crisp one-display-pixel raw-level boundaries as an RGBA layer."""
+    width, height = display_size
+    overlay = np.zeros((height, width, 4), dtype=np.uint8)
+    depth = np.asarray(depthmap.convert("L"), dtype=np.uint8)
+    if width < 1 or height < 1 or min(depth.shape) < 3:
+        return Image.fromarray(overlay, mode="RGBA")
+
+    valid = depth > 0
+    filtered = cv2.medianBlur(depth, 3)
+    if (width, height) != depthmap.size:
+        filtered = cv2.resize(filtered, (width, height), interpolation=cv2.INTER_NEAREST)
+        valid = cv2.resize(
+            valid.astype(np.uint8),
+            (width, height),
+            interpolation=cv2.INTER_NEAREST,
+        ).astype(bool)
+
+    contour_pixels = _raw_level_boundaries(filtered, valid)
+    overlay[contour_pixels] = (255, 255, 255, 220)
+    return Image.fromarray(overlay, mode="RGBA")
+
+
 def _raw_level_boundaries(depth: np.ndarray, valid: np.ndarray) -> np.ndarray:
+    """Return one-sided boundaries so every rendered contour stays one pixel wide."""
     boundaries = np.zeros(depth.shape, dtype=bool)
 
     horizontal = (depth[:, 1:] != depth[:, :-1]) & valid[:, 1:] & valid[:, :-1]
     boundaries[:, 1:] |= horizontal
-    boundaries[:, :-1] |= horizontal
 
     vertical = (depth[1:, :] != depth[:-1, :]) & valid[1:, :] & valid[:-1, :]
     boundaries[1:, :] |= vertical
-    boundaries[:-1, :] |= vertical
     return boundaries

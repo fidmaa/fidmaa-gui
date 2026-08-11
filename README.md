@@ -46,5 +46,7 @@ deviation for both straight 3D distance and median-filtered surface distance.
 
 The depth display can remain in raw grayscale or use locally stretched Viridis
 colours. An optional contour mode outlines boundaries between median-smoothed
-raw depth levels. These modes affect only visualization—the measurement engine
-continues to use the original depth values.
+raw depth levels. Contours are recomputed after zooming and stay one display
+pixel wide instead of scaling up with the source bitmap. These modes affect
+only visualization—the measurement engine continues to use the original depth
+values.

@@ -1,7 +1,10 @@
 import numpy as np
 from PIL import Image
 
-from fidmaa_gui.depth_visualization import render_depth_visualization
+from fidmaa_gui.depth_visualization import (
+    render_depth_contour_overlay,
+    render_depth_visualization,
+)
 
 
 def test_enhanced_color_separates_adjacent_high_depth_values():
@@ -45,6 +48,18 @@ def test_contours_mark_boundaries_between_median_filtered_raw_levels():
     white_plain = np.all(plain == 255, axis=2).sum()
     white_contoured = np.all(contoured == 255, axis=2).sum()
     assert white_contoured > white_plain
+
+
+def test_contours_are_recomputed_as_one_pixel_lines_at_display_resolution():
+    values = np.tile(np.array([241] * 6 + [242] * 6, dtype=np.uint8), (8, 1))
+    depth = Image.fromarray(values, mode="L")
+
+    overlay = np.asarray(render_depth_contour_overlay(depth, (120, 80)))
+    active_columns = np.flatnonzero(overlay[..., 3].any(axis=0))
+
+    assert overlay.shape == (80, 120, 4)
+    assert len(active_columns) == 1
+    assert active_columns[0] in (59, 60)
 
 
 def test_all_invalid_depth_produces_black_image_without_range():

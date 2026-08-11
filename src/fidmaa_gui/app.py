@@ -51,7 +51,11 @@ from PySide6.QtWidgets import (
 
 from . import const, errors
 from .calculations import findPoint
-from .depth_visualization import DepthDisplayMode, render_depth_visualization
+from .depth_visualization import (
+    DepthDisplayMode,
+    render_depth_contour_overlay,
+    render_depth_visualization,
+)
 from .region_measurement import (
     MeasurementError,
     Region,
@@ -845,15 +849,14 @@ class MainWindow(UILoaderMixin, QMainWindow):
 
         displayed_map = image_map
         raw_range = None
+        draw_contours = False
         if depth_visualization:
             mode = DepthDisplayMode(self.depthDisplayCombo.currentText())
             if mode != DepthDisplayMode.RAW:
-                visualization = render_depth_visualization(
-                    image_map,
-                    contours=mode == DepthDisplayMode.COLOR_CONTOURS,
-                )
+                visualization = render_depth_visualization(image_map)
                 displayed_map = visualization.image
                 raw_range = (visualization.low_raw, visualization.high_raw)
+                draw_contours = mode == DepthDisplayMode.COLOR_CONTOURS
 
         qimg = displayed_map.toqimage().scaled(w, h, Qt.KeepAspectRatio)
         canvas = QtGui.QPixmap(w, h)
@@ -863,6 +866,12 @@ class MainWindow(UILoaderMixin, QMainWindow):
             offset_x = (w - qimg.width()) // 2
             offset_y = (h - qimg.height()) // 2
             painter.drawImage(offset_x, offset_y, qimg)
+            if draw_contours:
+                contour_overlay = render_depth_contour_overlay(
+                    image_map,
+                    (qimg.width(), qimg.height()),
+                )
+                painter.drawImage(offset_x, offset_y, contour_overlay.toqimage())
 
             if source_size is not None and crop_box is not None:
                 self._paint_zoom_region_overlay(
@@ -1068,11 +1077,9 @@ class MainWindow(UILoaderMixin, QMainWindow):
         displayed_map = self.hairless_depth_image
         raw_range = None
         mode = DepthDisplayMode(self.depthDisplayCombo.currentText())
+        draw_contours = mode == DepthDisplayMode.COLOR_CONTOURS
         if mode != DepthDisplayMode.RAW:
-            visualization = render_depth_visualization(
-                self.hairless_depth_image,
-                contours=mode == DepthDisplayMode.COLOR_CONTOURS,
-            )
+            visualization = render_depth_visualization(self.hairless_depth_image)
             displayed_map = visualization.image
             raw_range = (visualization.low_raw, visualization.high_raw)
 
@@ -1084,6 +1091,12 @@ class MainWindow(UILoaderMixin, QMainWindow):
             offset_x = (w - qimg.width()) // 2
             offset_y = (h - qimg.height()) // 2
             painter.drawImage(offset_x, offset_y, qimg)
+            if draw_contours:
+                contour_overlay = render_depth_contour_overlay(
+                    self.hairless_depth_image,
+                    (qimg.width(), qimg.height()),
+                )
+                painter.drawImage(offset_x, offset_y, contour_overlay.toqimage())
 
             self._paint_zoom_region_overlay(
                 painter,
