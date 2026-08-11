@@ -34,7 +34,17 @@ uv run fidmaa_gui ~/path/to/photo.heic
 make all  # runs clean + pyinstaller + copy files
 ```
 
-The bundle lands in `dist/`.
+The bundle lands in `dist/`, and `make zip-app` packs it into
+`dist/fidmaa_gui.app.zip`.
+
+This is a local-only step on purpose — the bundle is roughly 850 MB, so CI
+neither builds it nor stores it. Note it is unsigned and un-notarized, so
+Gatekeeper blocks it on any machine other than the one that built it unless
+you clear the quarantine flag:
+
+```bash
+xattr -dr com.apple.quarantine dist/fidmaa_gui.app
+```
 
 ## Related projects
 
