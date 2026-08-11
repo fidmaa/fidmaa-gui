@@ -32,7 +32,6 @@ from PySide6.QtCore import QObject, QPoint, QSettings, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QApplication,
-    QButtonGroup,
     QComboBox,
     QDockWidget,
     QFileDialog,
@@ -135,22 +134,12 @@ class MainWindow(UILoaderMixin, QMainWindow):
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(8, 8, 8, 8)
 
-        mode_row = QHBoxLayout()
-        self.regionModeGroup = QButtonGroup(self)
-        self.regionModeGroup.setExclusive(True)
-        for identifier, text in ((0, "Point"), (1, "Draw A"), (2, "Draw B")):
-            button = QPushButton(text)
-            button.setCheckable(True)
-            self.regionModeGroup.addButton(button, identifier)
-            mode_row.addWidget(button)
-            if identifier == 0:
-                button.setChecked(True)
-                self.pointModeButton = button
-            elif identifier == 1:
-                self.regionAButton = button
-            else:
-                self.regionBButton = button
-        layout.addLayout(mode_row)
+        self.regionSelectionButton = QPushButton("Show measurement controls")
+        self.regionSelectionButton.setCheckable(True)
+        self.regionSelectionButton.setToolTip(
+            "Draw missing circles, or drag either existing circle to move or resize it."
+        )
+        layout.addWidget(self.regionSelectionButton)
 
         self.regionModeACombo, self.regionMaskACombo = self._create_region_options(
             layout, "Region A", SelectionMode.HIGHEST
@@ -194,14 +183,14 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.regionResultEdit.setReadOnly(True)
         self.regionResultEdit.setMinimumWidth(270)
         self.regionResultEdit.setPlainText(
-            "Draw region A, then region B to calculate a measurement."
+            "Enable measurement controls, then draw region A and region B."
         )
         layout.addWidget(self.regionResultEdit, stretch=1)
 
         self.regionDock.setWidget(panel)
         self.addDockWidget(Qt.RightDockWidgetArea, self.regionDock)
 
-        self.regionModeGroup.idClicked.connect(self._set_region_interaction_mode)
+        self.regionSelectionButton.toggled.connect(self._set_region_selection_enabled)
         for widget in (
             self.regionModeACombo,
             self.regionMaskACombo,
@@ -243,8 +232,18 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.pixelToolAction = tools_menu.addAction("Pixel tool")
         self.pixelToolAction.setShortcut(QtGui.QKeySequence(Qt.Key_P))
         self.pixelToolAction.setShortcutContext(Qt.WindowShortcut)
-        self.pixelToolAction.setStatusTip("Return to the original single-pixel tool")
+        self.pixelToolAction.setStatusTip(
+            "Hide measurement controls and return to the original single-pixel tool"
+        )
         self.pixelToolAction.triggered.connect(self._activate_pixel_tool)
+
+        self.measurementControlsAction = tools_menu.addAction("Show measurement controls")
+        self.measurementControlsAction.setCheckable(True)
+        self.measurementControlsAction.setStatusTip(
+            "Show and directly manipulate the two measurement circles"
+        )
+        self.measurementControlsAction.toggled.connect(self.regionSelectionButton.setChecked)
+        self.regionSelectionButton.toggled.connect(self.measurementControlsAction.setChecked)
 
         tools_menu.addSeparator()
         action_details = (
@@ -262,8 +261,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
             self.regionToolActions[mode] = action
 
     def _activate_pixel_tool(self, *args):
-        self.pointModeButton.setChecked(True)
-        self._set_region_interaction_mode(0)
+        self.regionSelectionButton.setChecked(False)
 
     def _activate_region_selector(self, mode, *args):
         target = self._region_target
@@ -275,21 +273,35 @@ class MainWindow(UILoaderMixin, QMainWindow):
             else:
                 target = self._last_region_target
 
+        self.regionSelectionButton.setChecked(True)
         if target == "a":
             combo = self.regionModeACombo
-            self.regionAButton.setChecked(True)
-            self._set_region_interaction_mode(1)
         else:
             combo = self.regionModeBCombo
-            self.regionBButton.setChecked(True)
-            self._set_region_interaction_mode(2)
+        self._region_target = target
+        self._last_region_target = target
         combo.setCurrentIndex(combo.findData(mode))
 
-    def _set_region_interaction_mode(self, identifier):
-        self._region_target = {0: None, 1: "a", 2: "b"}[identifier]
-        if self._region_target is not None:
-            self._last_region_target = self._region_target
+    def _set_region_selection_enabled(self, enabled):
+        if enabled:
+            if self.region_a is None:
+                self._region_target = "a"
+            elif self.region_b is None:
+                self._region_target = "b"
+            else:
+                self._region_target = self._last_region_target
+        else:
+            self._region_target = None
+            self._region_drag_action = None
         self.ui.imageLabel.setCursor(Qt.CursorShape.CrossCursor)
+        self._redraw_region_overlay()
+
+    def _next_missing_region(self):
+        if self.region_a is None:
+            return "a"
+        if self.region_b is None:
+            return "b"
+        return None
 
     def _active_region(self):
         if self._region_target == "a":
@@ -305,15 +317,31 @@ class MainWindow(UILoaderMixin, QMainWindow):
             self.region_b = region
 
     @staticmethod
-    def _region_contains(region, x, y):
-        return region.contains(x, y)
-
-    @staticmethod
     def _find_region_resize_center(region, x, y, tolerance=8):
         center_x, center_y = region.center
         distance = math.hypot(x - center_x, y - center_y)
         if abs(distance - region.radius) <= tolerance:
             return region.center
+        return None
+
+    def _find_region_at_point(self, x, y):
+        boundary_hits = []
+        inside_hits = []
+        for key, region in (("a", self.region_a), ("b", self.region_b)):
+            if region is None:
+                continue
+            center_x, center_y = region.center
+            distance = math.hypot(x - center_x, y - center_y)
+            boundary_distance = abs(distance - region.radius)
+            if boundary_distance <= 8:
+                boundary_hits.append((boundary_distance, key, region, "resize"))
+            elif region.contains(x, y):
+                inside_hits.append((distance, key, region, "move"))
+
+        if boundary_hits:
+            return min(boundary_hits, key=lambda hit: (hit[0], hit[1]))[1:]
+        if inside_hits:
+            return min(inside_hits, key=lambda hit: (hit[0], hit[1]))[1:]
         return None
 
     @staticmethod
@@ -360,15 +388,20 @@ class MainWindow(UILoaderMixin, QMainWindow):
             cursor = self._resize_cursor_for_point(region, point.x(), point.y())
         elif self._region_drag_action == "draw":
             cursor = Qt.CursorShape.CrossCursor
-        elif (
-            region is not None
-            and self._find_region_resize_center(region, point.x(), point.y()) is not None
-        ):
-            cursor = self._resize_cursor_for_point(region, point.x(), point.y())
-        elif region is not None and region.contains(point.x(), point.y()):
-            cursor = Qt.CursorShape.SizeAllCursor
         else:
-            cursor = Qt.CursorShape.CrossCursor
+            hit = self._find_region_at_point(point.x(), point.y())
+            if hit is not None:
+                key, region, action = hit
+                self._region_target = key
+                self._last_region_target = key
+                if action == "resize":
+                    cursor = self._resize_cursor_for_point(region, point.x(), point.y())
+                else:
+                    cursor = Qt.CursorShape.SizeAllCursor
+            elif self._next_missing_region() is not None:
+                cursor = Qt.CursorShape.CrossCursor
+            else:
+                cursor = Qt.CursorShape.ArrowCursor
         self.ui.imageLabel.setCursor(cursor)
 
     def _begin_region_drag(self, point):
@@ -376,24 +409,35 @@ class MainWindow(UILoaderMixin, QMainWindow):
             return
         x = float(clamp(point.x(), 0, const.MAIN_IMAGE_WIDTH))
         y = float(clamp(point.y(), 0, const.MAIN_IMAGE_HEIGHT))
+        hit = self._find_region_at_point(x, y)
+        if hit is not None:
+            target, region, action = hit
+            self._region_target = target
+            self._last_region_target = target
+        else:
+            target = self._next_missing_region()
+            if target is None:
+                self._region_drag_action = None
+                self._update_region_cursor(point)
+                return
+            self._region_target = target
+            self._last_region_target = target
+            region = None
+            action = "draw"
+
         self._region_drag_start = (x, y)
-        self._region_drag_original = self._active_region()
+        self._region_drag_original = region
         self._region_drag_anchor = None
 
-        region = self._region_drag_original
-        if region is not None:
+        if action == "resize":
             center = self._find_region_resize_center(region, x, y)
-            if center is not None:
-                self._region_drag_action = "resize"
-                self._region_drag_anchor = center
-                self._update_region_cursor(point)
-                return
-            if self._region_contains(region, x, y):
-                self._region_drag_action = "move"
-                self._update_region_cursor(point)
-                return
-        self._region_drag_action = "draw"
-        self._set_active_region(Region(x, y, x, y))
+            self._region_drag_action = "resize"
+            self._region_drag_anchor = center
+        elif action == "move":
+            self._region_drag_action = "move"
+        else:
+            self._region_drag_action = "draw"
+            self._set_active_region(Region(x, y, x, y))
         self._update_region_cursor(point)
 
     def _drag_region(self, point):
@@ -447,8 +491,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self._region_drag_anchor = None
 
         if completed_target == "a" and self.region_a is not None and self.region_b is None:
-            self.regionBButton.setChecked(True)
-            self._set_region_interaction_mode(2)
+            self._region_target = "b"
+            self._last_region_target = "b"
 
         self._calculate_region_measurement()
         self._redraw_region_overlay()
@@ -466,11 +510,13 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.region_a = None
         self.region_b = None
         self.region_measurement_result = None
-        self._region_target = None
+        self._region_target = (
+            "a"
+            if hasattr(self, "regionSelectionButton") and self.regionSelectionButton.isChecked()
+            else None
+        )
         self._last_region_target = "a"
         self._region_drag_action = None
-        if hasattr(self, "pointModeButton"):
-            self.pointModeButton.setChecked(True)
         if hasattr(self, "regionResultEdit"):
             self.regionResultEdit.setPlainText(
                 "Draw region A, then region B to calculate a measurement."
@@ -560,8 +606,12 @@ class MainWindow(UILoaderMixin, QMainWindow):
     def _redraw_region_overlay(self):
         if self.portrait:
             self.redrawImage(force=True)
+        if hasattr(self, "zoomedDepthMapLabel"):
+            self.redrawZoom()
 
     def _paint_region_overlay(self, painter):
+        if self._region_target is None:
+            return
         painter.save()
         try:
             colors = {
@@ -599,7 +649,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
                     max(1, int(region.width)),
                     max(1, int(region.height)),
                 )
-                if self._region_target == key:
+                if self._region_target is not None:
                     painter.setPen(Qt.NoPen)
                     painter.setBrush(color)
                     handle_x = region.right
@@ -679,6 +729,103 @@ class MainWindow(UILoaderMixin, QMainWindow):
     # Zoom painting methods (moved from ZoomWindow)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _zoom_display_point(point, source_size, crop_box, display_rect):
+        source_width, source_height = source_size
+        crop_left, crop_top, crop_right, crop_bottom = crop_box
+        display_left, display_top, display_width, display_height = display_rect
+        source_x = point[0] * source_width / const.MAIN_IMAGE_WIDTH
+        source_y = point[1] * source_height / const.MAIN_IMAGE_HEIGHT
+        return (
+            display_left + (source_x - crop_left) * display_width / max(1, crop_right - crop_left),
+            display_top + (source_y - crop_top) * display_height / max(1, crop_bottom - crop_top),
+        )
+
+    def _paint_zoom_region_overlay(self, painter, source_size, crop_box, display_rect):
+        if self._region_target is None:
+            return
+
+        def display_point(point):
+            x, y = self._zoom_display_point(point, source_size, crop_box, display_rect)
+            return QPoint(round(x), round(y))
+
+        painter.save()
+        try:
+            colors = {
+                "a": QColor(0, 190, 255, 230),
+                "b": QColor(255, 0, 170, 230),
+            }
+            result = self.region_measurement_result
+            if result is not None:
+                painter.setPen(QtGui.QPen(QColor(255, 255, 255, 175), 1))
+                painter.setBrush(Qt.NoBrush)
+                for sample in result.samples:
+                    painter.drawLine(
+                        display_point((sample.start.x, sample.start.y)),
+                        display_point((sample.end.x, sample.end.y)),
+                    )
+                for key, candidates in (
+                    ("a", result.candidates_a),
+                    ("b", result.candidates_b),
+                ):
+                    painter.setPen(Qt.NoPen)
+                    painter.setBrush(colors[key])
+                    for candidate in candidates:
+                        painter.drawEllipse(display_point((candidate.x, candidate.y)), 3, 3)
+
+            for key, region in (("a", self.region_a), ("b", self.region_b)):
+                if region is None:
+                    continue
+                top_left = display_point((region.left, region.top))
+                bottom_right = display_point((region.right, region.bottom))
+                color = colors[key]
+                painter.setPen(QtGui.QPen(color, 2))
+                painter.setBrush(QColor(color.red(), color.green(), color.blue(), 28))
+                painter.drawEllipse(
+                    top_left.x(),
+                    top_left.y(),
+                    bottom_right.x() - top_left.x(),
+                    bottom_right.y() - top_left.y(),
+                )
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(color)
+                painter.drawEllipse(
+                    display_point((region.right, region.center[1])),
+                    4,
+                    4,
+                )
+                painter.setPen(color)
+                painter.setBrush(Qt.NoBrush)
+                painter.drawText(
+                    display_point((region.center[0] + 4, region.center[1] - 4)),
+                    key.upper(),
+                )
+        finally:
+            painter.restore()
+
+    @staticmethod
+    def _paint_compact_zoom_info(painter, width, height, lines, text_color):
+        lines = [line for line in lines if line][:2]
+        if not lines:
+            return
+        painter.save()
+        try:
+            font = painter.font()
+            font.setPixelSize(max(9, min(11, height // 18)))
+            painter.setFont(font)
+            metrics = painter.fontMetrics()
+            line_height = metrics.height()
+            box_height = line_height * len(lines) + 8
+            box_top = max(5, height - box_height - 5)
+            painter.fillRect(5, box_top, max(1, width - 10), box_height, QColor(0, 0, 0, 155))
+            painter.setPen(text_color)
+            available_width = max(1, width - 20)
+            for index, line in enumerate(lines):
+                text = metrics.elidedText(line, Qt.ElideRight, available_width)
+                painter.drawText(10, box_top + 4 + metrics.ascent() + index * line_height, text)
+        finally:
+            painter.restore()
+
     def _paintZoomedMap(
         self,
         label_text,
@@ -688,6 +835,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
         mouse_y=None,
         ok_value_threshold=100,
         depth_visualization=False,
+        source_size=None,
+        crop_box=None,
     ):
         w = ui_element.width()
         h = ui_element.height()
@@ -706,11 +855,22 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 displayed_map = visualization.image
                 raw_range = (visualization.low_raw, visualization.high_raw)
 
-        qimg = displayed_map.toqimage().scaled(w, h, Qt.IgnoreAspectRatio)
+        qimg = displayed_map.toqimage().scaled(w, h, Qt.KeepAspectRatio)
         canvas = QtGui.QPixmap(w, h)
+        canvas.fill(Qt.black)
         painter = QtGui.QPainter(canvas)
         try:
-            painter.drawImage(0, 0, qimg)
+            offset_x = (w - qimg.width()) // 2
+            offset_y = (h - qimg.height()) // 2
+            painter.drawImage(offset_x, offset_y, qimg)
+
+            if source_size is not None and crop_box is not None:
+                self._paint_zoom_region_overlay(
+                    painter,
+                    source_size,
+                    crop_box,
+                    (offset_x, offset_y, qimg.width(), qimg.height()),
+                )
 
             painter.setPen(QColor(255, 0, 0, 255))
             half_w = w // 2
@@ -718,9 +878,6 @@ class MainWindow(UILoaderMixin, QMainWindow):
             painter.drawLine(QPoint(half_w, 0), QPoint(half_w, h))
             painter.drawLine(QPoint(0, half_h), QPoint(w, half_h))
 
-            font = painter.font()
-            font.setPixelSize(max(12, h // 12))
-            painter.setFont(font)
             source_x = image_map.width // 2
             source_y = image_map.height // 2
             try:
@@ -729,23 +886,31 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 value = image_map.getpixel((source_x, source_y))
 
             if depth_visualization and raw_range is not None:
-                painter.fillRect(5, 5, min(w - 10, 245), min(h - 10, 100), QColor(0, 0, 0, 150))
-                painter.setPen(QColor(255, 255, 255, 255))
+                text_color = QColor(255, 255, 255, 255)
             elif value < ok_value_threshold:
-                painter.setPen(QColor(255, 0, 0, 255))
+                text_color = QColor(255, 90, 90, 255)
             else:
-                painter.setPen(QColor(0, 255, 0, 255))
-            painter.drawText(QPoint(12, 25), str(label_text))
-            painter.drawText(QPoint(12, 48), f"raw: {value}")
+                text_color = QColor(90, 255, 90, 255)
+            lines = [f"{label_text} · raw {value}"]
+            details = []
             if raw_range is not None and raw_range[0] is not None:
-                painter.drawText(QPoint(12, 71), f"local range: {raw_range[0]}–{raw_range[1]}")
+                details.append(f"range {raw_range[0]}–{raw_range[1]}")
             if mouse_x is not None and mouse_y is not None:
-                painter.drawText(QPoint(12, 94), str(int(mouse_x)) + " x " + str(int(mouse_y)))
+                details.append(f"px {int(mouse_x)},{int(mouse_y)}")
+            lines.append(" · ".join(details))
+            self._paint_compact_zoom_info(painter, w, h, lines, text_color)
         finally:
             painter.end()
         ui_element.setPixmap(canvas)
 
-    def paintZoomedDepthmap(self, depthmap, mouse_x=None, mouse_y=None):
+    def paintZoomedDepthmap(
+        self,
+        depthmap,
+        mouse_x=None,
+        mouse_y=None,
+        source_size=None,
+        crop_box=None,
+    ):
         self._paintZoomedMap(
             "Depth map",
             depthmap,
@@ -753,9 +918,11 @@ class MainWindow(UILoaderMixin, QMainWindow):
             mouse_x,
             mouse_y,
             depth_visualization=True,
+            source_size=source_size,
+            crop_box=crop_box,
         )
 
-    def paintZoomedImage(self, zoomed):
+    def paintZoomedImage(self, zoomed, source_size=None, crop_box=None):
         w = self.zoomedImageLabel.width()
         h = self.zoomedImageLabel.height()
         if w < 1 or h < 1:
@@ -769,6 +936,14 @@ class MainWindow(UILoaderMixin, QMainWindow):
             offset_x = (w - qimg.width()) // 2
             offset_y = (h - qimg.height()) // 2
             painter.drawImage(offset_x, offset_y, qimg)
+
+            if source_size is not None and crop_box is not None:
+                self._paint_zoom_region_overlay(
+                    painter,
+                    source_size,
+                    crop_box,
+                    (offset_x, offset_y, qimg.width(), qimg.height()),
+                )
 
             painter.setPen(QColor(255, 0, 0, 255))
             half_w = w // 2
@@ -787,6 +962,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
         neck_arc_points=None,
         crop_origin=None,
         crop_size=None,
+        source_size=None,
+        crop_box=None,
     ):
         w = self.zoomedSkinMapLabel.width()
         h = self.zoomedSkinMapLabel.height()
@@ -802,30 +979,32 @@ class MainWindow(UILoaderMixin, QMainWindow):
             offset_y = (h - qimg.height()) // 2
             painter.drawImage(offset_x, offset_y, qimg)
 
+            if source_size is not None and crop_box is not None:
+                self._paint_zoom_region_overlay(
+                    painter,
+                    source_size,
+                    crop_box,
+                    (offset_x, offset_y, qimg.width(), qimg.height()),
+                )
+
             painter.setPen(QColor(255, 0, 0, 255))
             half_w = w // 2
             half_h = h // 2
             painter.drawLine(QPoint(half_w, 0), QPoint(half_w, h))
             painter.drawLine(QPoint(0, half_h), QPoint(w, half_h))
 
-            font = painter.font()
-            font.setPixelSize(max(16, h // 10))
-            painter.setFont(font)
-            half_w = w // 2
-            half_h = h // 2
             try:
-                value = skinmap.getpixel((half_w, half_h))[0]
+                value = skinmap.getpixel((skinmap.width // 2, skinmap.height // 2))[0]
             except TypeError:
-                value = skinmap.getpixel((half_w, half_h))
+                value = skinmap.getpixel((skinmap.width // 2, skinmap.height // 2))
 
             if value < 100:
-                painter.setPen(QColor(255, 0, 0, 255))
+                text_color = QColor(255, 90, 90, 255)
             else:
-                painter.setPen(QColor(0, 255, 0, 255))
-            painter.drawText(QPoint(50, 50), "Skin matte")
-            painter.drawText(QPoint(50, 100), str(value))
+                text_color = QColor(90, 255, 90, 255)
+            lines = [f"Skin matte · raw {value}"]
             if mouse_x is not None and mouse_y is not None:
-                painter.drawText(QPoint(50, 150), str(int(mouse_x)) + " x " + str(int(mouse_y)))
+                lines.append(f"px {int(mouse_x)},{int(mouse_y)}")
 
             if neck_arc_points and crop_origin and crop_size:
                 arc_color = QColor(255, 165, 0, 200)
@@ -846,6 +1025,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 painter.setPen(pen)
                 for i in range(1, len(display_pts)):
                     painter.drawLine(display_pts[i - 1], display_pts[i])
+            self._paint_compact_zoom_info(painter, w, h, lines, text_color)
         finally:
             painter.end()
         self.zoomedSkinMapLabel.setPixmap(canvas)
@@ -905,18 +1085,34 @@ class MainWindow(UILoaderMixin, QMainWindow):
             offset_y = (h - qimg.height()) // 2
             painter.drawImage(offset_x, offset_y, qimg)
 
-            font = painter.font()
-            font.setPixelSize(max(16, h // 10))
-            painter.setFont(font)
-            painter.setPen(QColor(255, 255, 255, 255))
-            painter.drawText(QPoint(5, 20), "Depth (hairless)")
+            self._paint_zoom_region_overlay(
+                painter,
+                self.hairless_depth_image.size,
+                (0, 0, *self.hairless_depth_image.size),
+                (offset_x, offset_y, qimg.width(), qimg.height()),
+            )
+            lines = ["Depth (hairless)"]
             if raw_range is not None and raw_range[0] is not None:
-                painter.drawText(QPoint(5, 40), f"range: {raw_range[0]}–{raw_range[1]}")
+                lines.append(f"range {raw_range[0]}–{raw_range[1]}")
+            self._paint_compact_zoom_info(
+                painter,
+                w,
+                h,
+                lines,
+                QColor(255, 255, 255, 255),
+            )
         finally:
             painter.end()
         self.skinMaskLabel.setPixmap(canvas)
 
-    def paintZoomedHairlessDepth(self, zoomed, mouse_x=None, mouse_y=None):
+    def paintZoomedHairlessDepth(
+        self,
+        zoomed,
+        mouse_x=None,
+        mouse_y=None,
+        source_size=None,
+        crop_box=None,
+    ):
         """Display zoomed hairless depth map with value readout."""
         self._paintZoomedMap(
             "Depth (hairless)",
@@ -925,6 +1121,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
             mouse_x,
             mouse_y,
             depth_visualization=True,
+            source_size=source_size,
+            crop_box=crop_box,
         )
 
     def paintZoomedTeethmap(
@@ -935,6 +1133,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
         centroids=None,
         crop_origin=None,
         crop_size=None,
+        source_size=None,
+        crop_box=None,
     ):
         w = self.zoomedTeethMapLabel.width()
         h = self.zoomedTeethMapLabel.height()
@@ -948,6 +1148,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
             mouse_x,
             mouse_y,
             ok_value_threshold=200,
+            source_size=source_size,
+            crop_box=crop_box,
         )
 
         if centroids is None or crop_origin is None or crop_size is None:
@@ -1034,28 +1236,30 @@ class MainWindow(UILoaderMixin, QMainWindow):
         if self.smallImage:
             big_image_x = mouse_x * self.image.size[0] / img_w
             big_image_y = mouse_y * self.image.size[1] / img_h
-            zoomed = self.image.crop(
-                (
-                    big_image_x - crop_w,
-                    big_image_y - crop_h,
-                    big_image_x + crop_w,
-                    big_image_y + crop_h,
-                )
-            ).resize((zoom_w, zoom_h))
-            self.paintZoomedImage(zoomed)
+            photo_crop = (
+                big_image_x - crop_w,
+                big_image_y - crop_h,
+                big_image_x + crop_w,
+                big_image_y + crop_h,
+            )
+            zoomed = self.image.crop(photo_crop).resize((zoom_w, zoom_h))
+            self.paintZoomedImage(
+                zoomed,
+                source_size=self.image.size,
+                crop_box=photo_crop,
+            )
 
         if self.portrait and self.portrait.skinmap:
             skinmap_x, skinmap_y = translate_coordinates_to_other_image(
                 (mouse_x, mouse_y), (img_w, img_h), (self.portrait.skinmap.size)
             )
-            zoomed = self.portrait.skinmap.crop(
-                (
-                    skinmap_x - crop_w,
-                    skinmap_y - crop_h,
-                    skinmap_x + crop_w,
-                    skinmap_y + crop_h,
-                )
-            ).resize((zoom_w, zoom_h))
+            skin_crop = (
+                skinmap_x - crop_w,
+                skinmap_y - crop_h,
+                skinmap_x + crop_w,
+                skinmap_y + crop_h,
+            )
+            zoomed = self.portrait.skinmap.crop(skin_crop).resize((zoom_w, zoom_h))
             neck_arc_points = None
             skin_crop_origin = None
             skin_crop_size = None
@@ -1071,6 +1275,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 neck_arc_points=neck_arc_points,
                 crop_origin=skin_crop_origin,
                 crop_size=skin_crop_size,
+                source_size=self.portrait.skinmap.size,
+                crop_box=skin_crop,
             )
 
         if self.hairless_depth_image is not None:
@@ -1079,8 +1285,15 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 (img_w, img_h),
                 self.hairless_depth_image.size,
             )
-            zoomed = self.hairless_depth_image.crop((hd_x - 72, hd_y - 48, hd_x + 72, hd_y + 48))
-            self.paintZoomedHairlessDepth(zoomed, mouse_x=hd_x, mouse_y=hd_y)
+            hairless_crop = (hd_x - 72, hd_y - 48, hd_x + 72, hd_y + 48)
+            zoomed = self.hairless_depth_image.crop(hairless_crop)
+            self.paintZoomedHairlessDepth(
+                zoomed,
+                mouse_x=hd_x,
+                mouse_y=hd_y,
+                source_size=self.hairless_depth_image.size,
+                crop_box=hairless_crop,
+            )
         else:
             self.paintHairlessDepthFull()
 
@@ -1089,14 +1302,13 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 (mouse_x, mouse_y), (img_w, img_h), (self.portrait.teethmap.size)
             )
 
-            zoomed = self.portrait.teethmap.crop(
-                (
-                    teethmap_x - crop_w,
-                    teethmap_y - crop_h,
-                    teethmap_x + crop_w,
-                    teethmap_y + crop_h,
-                )
-            ).resize((zoom_w, zoom_h))
+            teeth_crop = (
+                teethmap_x - crop_w,
+                teethmap_y - crop_h,
+                teethmap_x + crop_w,
+                teethmap_y + crop_h,
+            )
+            zoomed = self.portrait.teethmap.crop(teeth_crop).resize((zoom_w, zoom_h))
 
             centroids = None
             if self.ui.showCentroidsCheckBox.isChecked() and self.portrait.incisor_measurement:
@@ -1112,15 +1324,20 @@ class MainWindow(UILoaderMixin, QMainWindow):
                     teethmap_y - crop_h,
                 ),
                 crop_size=(crop_w * 2, crop_h * 2),
+                source_size=self.portrait.teethmap.size,
+                crop_box=teeth_crop,
             )
 
         if self.depthmap:
-            zoomed = self.depthmap.crop((mouse_x - 72, mouse_y - 48, mouse_x + 72, mouse_y + 48))
+            depth_crop = (mouse_x - 72, mouse_y - 48, mouse_x + 72, mouse_y + 48)
+            zoomed = self.depthmap.crop(depth_crop)
 
             self.paintZoomedDepthmap(
                 zoomed,
                 mouse_x=mouse_x,
                 mouse_y=mouse_y,
+                source_size=self.depthmap.size,
+                crop_box=depth_crop,
             )
 
     def redrawImage(self, *args, **kw):
