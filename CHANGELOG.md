@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Added an `Area (uniform)` region selector for surfaces without a single
+  meaningful extremum. It samples deterministic corresponding positions over
+  both disks and bypasses candidate-depth ranking.
 - Restored absolute `Highest` and `Lowest` region selectors while retaining
   pose-resistant `Local peak` and `Local valley` selectors.
 - Added a visible skin-matte-to-stable-depth neck overlay on the main image and
@@ -25,6 +28,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   at fractional coordinates, and invalid zero-depth detection.
 - Added evenly distributed profile samples that retain both measurement
   endpoints and produce the same result regardless of point order.
+
+### Changed
+
+- Changed measurement defaults to a 20 px patch radius and 5% candidate pool,
+  and increased the supported profile count from 10 to 30 (default remains
+  10).
 
 ### Fixed
 

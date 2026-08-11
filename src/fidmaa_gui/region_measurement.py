@@ -21,6 +21,7 @@ class MeasurementError(ValueError):
 
 
 class SelectionMode(str, Enum):
+    AREA = "Area (uniform)"
     HIGHEST = "Highest"
     LOWEST = "Lowest"
     LOCAL_PEAK = "Local peak"
@@ -175,8 +176,8 @@ class RegionMeasurementEngine:
         percentile: float = 10.0,
         vector_count: int = 10,
     ) -> RegionMeasurementResult:
-        if not 5 <= vector_count <= 10:
-            raise MeasurementError("Vector count must be between 5 and 10")
+        if not 5 <= vector_count <= 30:
+            raise MeasurementError("Vector count must be between 5 and 30")
         if not 5 <= percentile <= 20:
             raise MeasurementError("Candidate percentile must be between 5 and 20")
 
@@ -194,7 +195,10 @@ class RegionMeasurementEngine:
             percentile=percentile,
             count=vector_count,
         )
-        pairs = pair_candidates(candidates_a, candidates_b, region_a, region_b)
+        if mode_a == SelectionMode.AREA and mode_b == SelectionMode.AREA:
+            pairs = list(zip(candidates_a, candidates_b, strict=True))
+        else:
+            pairs = pair_candidates(candidates_a, candidates_b, region_a, region_b)
         samples = []
         for start, end in pairs:
             linear_mm = math.dist(start.point_3d_mm, end.point_3d_mm)
@@ -225,6 +229,18 @@ class RegionMeasurementEngine:
         valid &= np.isfinite(z_cm) & (z_cm > 0)
         x_mm, y_mm, z_mm = self._to_3d(x_coords, y_coords, z_cm)
         valid &= np.isfinite(x_mm) & np.isfinite(y_mm) & np.isfinite(z_mm)
+
+        if mode == SelectionMode.AREA:
+            return uniformly_distributed_area_points(
+                region,
+                x_coords,
+                y_coords,
+                x_mm,
+                y_mm,
+                z_mm,
+                valid,
+                count,
+            )
 
         if mode == SelectionMode.HIGHEST:
             score = z_cm
@@ -453,6 +469,59 @@ def spatially_distributed_points(points: list[CandidatePoint], count: int) -> li
         minimum_distance = np.minimum(minimum_distance, distance)
         minimum_distance[selected_indexes] = -1
     return [points[index] for index in selected_indexes]
+
+
+def uniformly_distributed_area_points(
+    region: Region,
+    x_coords: np.ndarray,
+    y_coords: np.ndarray,
+    x_mm: np.ndarray,
+    y_mm: np.ndarray,
+    z_mm: np.ndarray,
+    valid: np.ndarray,
+    count: int,
+) -> list[CandidatePoint]:
+    """Match valid pixels to deterministic, uniform targets across a disk."""
+    valid_indexes = np.flatnonzero(valid.ravel())
+    if len(valid_indexes) < count:
+        raise MeasurementError(f"Region contains fewer than {count} valid candidate pixels")
+
+    center_x, center_y = region.center
+    targets = [(center_x, center_y)]
+    remaining = count - 1
+    golden_angle = math.pi * (3.0 - math.sqrt(5.0))
+    for index in range(remaining):
+        radial_fraction = 0.90 * math.sqrt((index + 0.5) / max(1, remaining))
+        angle = index * golden_angle
+        targets.append(
+            (
+                center_x + region.radius * radial_fraction * math.cos(angle),
+                center_y + region.radius * radial_fraction * math.sin(angle),
+            )
+        )
+
+    flat_x = x_coords.ravel()
+    flat_y = y_coords.ravel()
+    available = valid_indexes.copy()
+    selected = []
+    for sample_index, (target_x, target_y) in enumerate(targets):
+        distances = (flat_x[available] - target_x) ** 2 + (flat_y[available] - target_y) ** 2
+        nearest_position = int(np.argmin(distances))
+        pixel_index = int(available[nearest_position])
+        selected.append(
+            CandidatePoint(
+                x=int(flat_x[pixel_index]),
+                y=int(flat_y[pixel_index]),
+                point_3d_mm=(
+                    float(x_mm.ravel()[pixel_index]),
+                    float(y_mm.ravel()[pixel_index]),
+                    float(z_mm.ravel()[pixel_index]),
+                ),
+                score=float(sample_index),
+            )
+        )
+        available = np.delete(available, nearest_position)
+    return selected
 
 
 def pair_candidates(

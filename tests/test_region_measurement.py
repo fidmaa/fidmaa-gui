@@ -127,6 +127,66 @@ def test_highest_and_lowest_select_absolute_depth_extremes():
     assert all(point.x >= 13 for point in lowest)
 
 
+def test_area_selector_is_uniform_and_ignores_depth_shape():
+    y, x = np.indices((41, 41), dtype=np.float64)
+    first_depth = 40 + x + 2 * y
+    second_depth = 220 - 3 * x - y
+    region = Region(0, 0, 41, 41)
+
+    first = make_engine(np.clip(first_depth, 1, 255)).select_candidates(
+        region,
+        mode=SelectionMode.AREA,
+        mask=RegionMask.NONE,
+        percentile=5,
+        count=25,
+    )
+    second = make_engine(np.clip(second_depth, 1, 255)).select_candidates(
+        region,
+        mode=SelectionMode.AREA,
+        mask=RegionMask.NONE,
+        percentile=20,
+        count=25,
+    )
+
+    assert [(point.x, point.y) for point in first] == [(point.x, point.y) for point in second]
+    assert math.dist((first[0].x, first[0].y), region.center) <= 1
+    assert min(point.x for point in first) < 7
+    assert max(point.x for point in first) > 34
+    assert min(point.y for point in first) < 7
+    assert max(point.y for point in first) > 34
+
+
+def test_area_to_area_pairs_matching_relative_positions_for_30_profiles():
+    engine = make_engine(np.full((61, 21), 80, dtype=np.uint8))
+
+    result = engine.measure(
+        Region(0, 0, 21, 21),
+        Region(0, 30, 21, 51),
+        mode_a=SelectionMode.AREA,
+        mode_b=SelectionMode.AREA,
+        percentile=5,
+        vector_count=30,
+    )
+
+    assert len(result.samples) == 30
+    assert all(sample.end.x - sample.start.x == 0 for sample in result.samples)
+    assert all(sample.end.y - sample.start.y == 30 for sample in result.samples)
+
+
+def test_more_than_30_profiles_is_rejected():
+    engine = make_engine(np.full((61, 21), 80, dtype=np.uint8))
+
+    with pytest.raises(MeasurementError, match="between 5 and 30"):
+        engine.measure(
+            Region(0, 0, 21, 21),
+            Region(0, 30, 21, 51),
+            mode_a=SelectionMode.AREA,
+            mode_b=SelectionMode.AREA,
+            percentile=5,
+            vector_count=31,
+        )
+
+
 def test_bounding_box_corners_are_excluded_by_circular_mask():
     depth = np.full((11, 11), 50, dtype=np.uint8)
     depth[0, 0] = 1

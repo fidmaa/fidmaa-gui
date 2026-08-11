@@ -69,6 +69,8 @@ def test_single_key_tool_shortcuts_and_tools_menu(qapp):
         window.regionModeACombo.itemData(index) for index in range(window.regionModeACombo.count())
     }
     assert available_modes == set(SelectionMode)
+    assert SelectionMode.AREA in window.regionToolActions
+    assert window.regionToolActions[SelectionMode.AREA].shortcut().isEmpty()
 
     QTest.keyClick(window, Qt.Key_H)
     assert window._region_target == "a"
@@ -312,6 +314,13 @@ def test_panel_calculates_linear_and_surface_summaries(qapp):
         for index in range(window.depthDisplayCombo.count())
     } == {mode.value for mode in DepthDisplayMode}
     assert window.depthContourStepSpin.value() == 4
+    assert window.regionRadiusSpin.value() == 20
+    assert window.regionPercentileSpin.value() == 5
+    assert window.regionVectorCountSpin.minimum() == 5
+    assert window.regionVectorCountSpin.maximum() == 30
+    window.regionModeACombo.setCurrentIndex(window.regionModeACombo.findData(SelectionMode.AREA))
+    window.regionModeBCombo.setCurrentIndex(window.regionModeBCombo.findData(SelectionMode.AREA))
+    assert not window.regionPercentileSpin.isEnabled()
     assert not window.depthContourStepSpin.isEnabled()
     window.depthDisplayCombo.setCurrentIndex(
         window.depthDisplayCombo.findData(DepthDisplayMode.COLOR_CONTOURS)

@@ -160,7 +160,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
         settings_form = QFormLayout(settings_group)
         self.regionRadiusSpin = QSpinBox()
         self.regionRadiusSpin.setRange(10, 120)
-        self.regionRadiusSpin.setValue(40)
+        self.regionRadiusSpin.setValue(20)
         self.regionRadiusSpin.setSuffix(" px")
         self.regionRadiusSpin.setToolTip(
             "Shared radius of both click-to-place measurement patches."
@@ -168,11 +168,11 @@ class MainWindow(UILoaderMixin, QMainWindow):
         settings_form.addRow("Patch radius:", self.regionRadiusSpin)
         self.regionPercentileSpin = QSpinBox()
         self.regionPercentileSpin.setRange(5, 20)
-        self.regionPercentileSpin.setValue(10)
+        self.regionPercentileSpin.setValue(5)
         self.regionPercentileSpin.setSuffix(" %")
         settings_form.addRow("Candidate pool:", self.regionPercentileSpin)
         self.regionVectorCountSpin = QSpinBox()
-        self.regionVectorCountSpin.setRange(5, 10)
+        self.regionVectorCountSpin.setRange(5, 30)
         self.regionVectorCountSpin.setValue(10)
         settings_form.addRow("Profiles:", self.regionVectorCountSpin)
         layout.addWidget(settings_group)
@@ -236,6 +236,9 @@ class MainWindow(UILoaderMixin, QMainWindow):
         for mode in SelectionMode:
             mode_combo.addItem(mode.value, mode)
         mode_tooltips = {
+            SelectionMode.AREA: (
+                "Ignore shape/depth ranking and sample uniformly across the whole patch."
+            ),
             SelectionMode.HIGHEST: (
                 "Select the globally nearest surface points in the entire patch."
             ),
@@ -289,6 +292,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
             (SelectionMode.FLATTEST, Qt.Key_F, "Flattest region tool"),
             (SelectionMode.LOCAL_PEAK, None, "Local peak region tool"),
             (SelectionMode.LOCAL_VALLEY, None, "Local valley region tool"),
+            (SelectionMode.AREA, None, "Uniform area region tool"),
         )
         self.regionToolActions = {}
         for mode, key, text in action_details:
@@ -485,6 +489,16 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self._update_region_cursor(point)
 
     def _region_settings_changed(self, *args):
+        both_uniform_area = (
+            self.regionModeACombo.currentText() == SelectionMode.AREA.value
+            and self.regionModeBCombo.currentText() == SelectionMode.AREA.value
+        )
+        self.regionPercentileSpin.setEnabled(not both_uniform_area)
+        self.regionPercentileSpin.setToolTip(
+            "Ignored because uniform Area samples the complete disk."
+            if both_uniform_area
+            else "Percentage of ranked pixels used as the candidate pool."
+        )
         self.region_measurement_result = None
         self._calculate_region_measurement()
         self._redraw_region_overlay()
@@ -561,10 +575,18 @@ class MainWindow(UILoaderMixin, QMainWindow):
         linear = result.linear_stats()
         surface = result.surface_stats()
         valid_surface_count = sum(sample.surface_mm is not None for sample in result.samples)
+        if mode_a == SelectionMode.AREA and mode_b == SelectionMode.AREA:
+            candidate_pool_text = "Candidate pool: full area (uniform)"
+        elif SelectionMode.AREA in (mode_a, mode_b):
+            candidate_pool_text = (
+                f"Candidate pool: {self.regionPercentileSpin.value()}% (ignored for Area selector)"
+            )
+        else:
+            candidate_pool_text = f"Candidate pool: {self.regionPercentileSpin.value()}%"
         lines = [
             f"A: {mode_a.value}, mask={mask_a.value}, radius={self.region_a.radius:.0f} px",
             f"B: {mode_b.value}, mask={mask_b.value}, radius={self.region_b.radius:.0f} px",
-            f"Candidate pool: {self.regionPercentileSpin.value()}%",
+            candidate_pool_text,
             f"Requested profiles: {requested}",
             "",
         ]
