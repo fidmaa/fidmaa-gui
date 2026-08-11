@@ -14,7 +14,6 @@ class DepthDisplayMode(str, Enum):
     RAW = "Raw grayscale"
     COLOR = "Enhanced color"
     COLOR_CONTOURS = "Color + contours"
-    CURSOR_BANDS = "Cursor depth bands"
 
 
 @dataclass(frozen=True)
@@ -64,46 +63,6 @@ def render_depth_visualization(
     return DepthVisualization(Image.fromarray(colored, mode="RGB"), low, high)
 
 
-def render_depth_focus_visualization(
-    depthmap: Image.Image,
-    center_raw: int,
-    *,
-    radius: int = 2,
-) -> DepthVisualization:
-    """Color only exact raw levels within ``center_raw ± radius``.
-
-    Values outside the selected band remain as a deliberately dim grayscale
-    context. Each in-band integer level receives a discrete Turbo color, while
-    the exact cursor level is white so it remains immediately identifiable.
-    """
-    if radius < 1:
-        raise ValueError("radius must be at least 1")
-
-    depth = np.asarray(depthmap.convert("L"), dtype=np.uint8)
-    valid = depth > 0
-    gray = np.rint(depth.astype(np.float32) * 0.18).astype(np.uint8)
-    colored = np.repeat(gray[..., None], 3, axis=2)
-    colored[~valid] = 0
-
-    delta = depth.astype(np.int16) - int(center_raw)
-    in_band = valid & (np.abs(delta) <= radius)
-    palette_position = np.clip(
-        np.rint((delta.astype(np.float32) + radius) * 255 / (2 * radius)),
-        0,
-        255,
-    ).astype(np.uint8)
-    turbo_bgr = cv2.applyColorMap(palette_position, cv2.COLORMAP_TURBO)
-    turbo_rgb = cv2.cvtColor(turbo_bgr, cv2.COLOR_BGR2RGB)
-    colored[in_band] = turbo_rgb[in_band]
-    colored[valid & (delta == 0)] = (255, 255, 255)
-
-    return DepthVisualization(
-        Image.fromarray(colored, mode="RGB"),
-        max(1, int(center_raw) - radius),
-        min(255, int(center_raw) + radius),
-    )
-
-
 def render_depth_contour_overlay(
     depthmap: Image.Image,
     display_size: tuple[int, int],
@@ -120,6 +79,8 @@ def render_depth_contour_overlay(
         return Image.fromarray(overlay, mode="RGBA")
 
     valid = depth > 0
+    # Match measurement preprocessing: suppress isolated TrueDepth noise with
+    # a 3x3 median before extracting raw-level boundaries.
     filtered = cv2.medianBlur(depth, 3)
     if (width, height) != depthmap.size:
         filtered = cv2.resize(filtered, (width, height), interpolation=cv2.INTER_NEAREST)

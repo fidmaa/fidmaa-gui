@@ -24,7 +24,10 @@ from portrait_analyser.incisor import (
 )
 from portrait_analyser.ios import IOSPortrait, load_image
 from portrait_analyser.mouth import compute_mouth_measurement_from_facemesh
-from portrait_analyser.neck import compute_neck_circumference
+from portrait_analyser.neck import (
+    compute_neck_circumference,
+    neck_search_bounds_from_face_landmarks,
+)
 from portrait_analyser.pose import PortraitPose, detect_neck_midpoint
 from portrait_analyser.tmd import compute_tmd_3d
 from PySide6 import QtGui
@@ -54,7 +57,6 @@ from .calculations import findPoint
 from .depth_visualization import (
     DepthDisplayMode,
     render_depth_contour_overlay,
-    render_depth_focus_visualization,
     render_depth_visualization,
 )
 from .region_measurement import (
@@ -111,6 +113,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.filtered_depthmap = None
         self.teethmap = None
         self.neck_measurement_auto = None
+        self.neck_search_bounds = None
 
         self.float_max_value = self.float_min_value = None
 
@@ -188,23 +191,13 @@ class MainWindow(UILoaderMixin, QMainWindow):
         depth_form.addRow("Mode:", self.depthDisplayCombo)
         self.depthContourStepSpin = QSpinBox()
         self.depthContourStepSpin.setRange(1, 8)
-        self.depthContourStepSpin.setValue(3)
+        self.depthContourStepSpin.setValue(4)
         self.depthContourStepSpin.setSuffix(" levels")
         self.depthContourStepSpin.setToolTip(
             "Draw one contour for every N raw depth levels. Measurements are unchanged."
         )
         self.depthContourStepSpin.setEnabled(False)
         depth_form.addRow("Contour step:", self.depthContourStepSpin)
-        self.depthFocusRadiusSpin = QSpinBox()
-        self.depthFocusRadiusSpin.setRange(1, 8)
-        self.depthFocusRadiusSpin.setValue(2)
-        self.depthFocusRadiusSpin.setPrefix("± ")
-        self.depthFocusRadiusSpin.setSuffix(" levels")
-        self.depthFocusRadiusSpin.setToolTip(
-            "Color only raw depth values within this distance of the cursor value."
-        )
-        self.depthFocusRadiusSpin.setEnabled(False)
-        depth_form.addRow("Cursor range:", self.depthFocusRadiusSpin)
         layout.addWidget(depth_group)
 
         clear_button = QPushButton("Clear regions")
@@ -235,7 +228,6 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.regionRadiusSpin.valueChanged.connect(self._region_radius_changed)
         self.depthDisplayCombo.currentIndexChanged.connect(self._depth_display_changed)
         self.depthContourStepSpin.valueChanged.connect(self._depth_display_changed)
-        self.depthFocusRadiusSpin.valueChanged.connect(self._depth_display_changed)
 
     def _create_region_options(self, parent_layout, title, default_mode):
         group = QGroupBox(title)
@@ -500,7 +492,6 @@ class MainWindow(UILoaderMixin, QMainWindow):
     def _depth_display_changed(self, *args):
         mode = self.depthDisplayCombo.currentData()
         self.depthContourStepSpin.setEnabled(mode == DepthDisplayMode.COLOR_CONTOURS)
-        self.depthFocusRadiusSpin.setEnabled(mode == DepthDisplayMode.CURSOR_BANDS)
         self.redrawZoom()
 
     def clear_region_measurement(self, *args, repaint=True):
@@ -906,25 +897,9 @@ class MainWindow(UILoaderMixin, QMainWindow):
         displayed_map = image_map
         raw_range = None
         draw_contours = False
-        focus_mode = False
-        source_x = image_map.width // 2
-        source_y = image_map.height // 2
-        try:
-            value = image_map.getpixel((source_x, source_y))[0]
-        except TypeError:
-            value = image_map.getpixel((source_x, source_y))
         if depth_visualization:
             mode = DepthDisplayMode(self.depthDisplayCombo.currentText())
-            if mode == DepthDisplayMode.CURSOR_BANDS:
-                visualization = render_depth_focus_visualization(
-                    image_map,
-                    value,
-                    radius=self.depthFocusRadiusSpin.value(),
-                )
-                displayed_map = visualization.image
-                raw_range = (visualization.low_raw, visualization.high_raw)
-                focus_mode = True
-            elif mode != DepthDisplayMode.RAW:
+            if mode != DepthDisplayMode.RAW:
                 visualization = render_depth_visualization(image_map)
                 displayed_map = visualization.image
                 raw_range = (visualization.low_raw, visualization.high_raw)
@@ -960,6 +935,13 @@ class MainWindow(UILoaderMixin, QMainWindow):
             painter.drawLine(QPoint(half_w, 0), QPoint(half_w, h))
             painter.drawLine(QPoint(0, half_h), QPoint(w, half_h))
 
+            source_x = image_map.width // 2
+            source_y = image_map.height // 2
+            try:
+                value = image_map.getpixel((source_x, source_y))[0]
+            except TypeError:
+                value = image_map.getpixel((source_x, source_y))
+
             if depth_visualization and raw_range is not None:
                 text_color = QColor(255, 255, 255, 255)
             elif value < ok_value_threshold:
@@ -968,9 +950,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 text_color = QColor(90, 255, 90, 255)
             lines = [f"{label_text} · raw {value}"]
             details = []
-            if focus_mode:
-                details.append(f"cursor ±{self.depthFocusRadiusSpin.value()} levels")
-            elif raw_range is not None and raw_range[0] is not None:
+            if raw_range is not None and raw_range[0] is not None:
                 details.append(f"range {raw_range[0]}–{raw_range[1]}")
             if mouse_x is not None and mouse_y is not None:
                 details.append(f"px {int(mouse_x)},{int(mouse_y)}")
@@ -1124,27 +1104,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
         raw_range = None
         mode = DepthDisplayMode(self.depthDisplayCombo.currentText())
         draw_contours = mode == DepthDisplayMode.COLOR_CONTOURS
-        focus_mode = mode == DepthDisplayMode.CURSOR_BANDS
-        if focus_mode:
-            focus_x = round(
-                self.last_zoom_x
-                * (self.hairless_depth_image.width - 1)
-                / max(1, const.MAIN_IMAGE_WIDTH - 1)
-            )
-            focus_y = round(
-                self.last_zoom_y
-                * (self.hairless_depth_image.height - 1)
-                / max(1, const.MAIN_IMAGE_HEIGHT - 1)
-            )
-            focus_raw = self.hairless_depth_image.getpixel((focus_x, focus_y))
-            visualization = render_depth_focus_visualization(
-                self.hairless_depth_image,
-                focus_raw,
-                radius=self.depthFocusRadiusSpin.value(),
-            )
-            displayed_map = visualization.image
-            raw_range = (visualization.low_raw, visualization.high_raw)
-        elif mode != DepthDisplayMode.RAW:
+        if mode != DepthDisplayMode.RAW:
             visualization = render_depth_visualization(self.hairless_depth_image)
             displayed_map = visualization.image
             raw_range = (visualization.low_raw, visualization.high_raw)
@@ -1172,11 +1132,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 (offset_x, offset_y, qimg.width(), qimg.height()),
             )
             lines = ["Depth (hairless)"]
-            if focus_mode:
-                lines.append(
-                    f"raw {focus_raw} · cursor ±{self.depthFocusRadiusSpin.value()} levels"
-                )
-            elif raw_range is not None and raw_range[0] is not None:
+            if raw_range is not None and raw_range[0] is not None:
                 lines.append(f"range {raw_range[0]}–{raw_range[1]}")
             self._paint_compact_zoom_info(
                 painter,
@@ -2028,6 +1984,11 @@ class MainWindow(UILoaderMixin, QMainWindow):
                         )
                     txt += f"\n  Multiplier: {nma.circumference_multiplier:.1f}"
                     txt += f"\n  Arc points: {len(nma.arc_points_photo):d}"
+                    if self.neck_search_bounds is not None:
+                        txt += (
+                            "\n  Anatomical search band:"
+                            f" Y {self.neck_search_bounds[0]}–{self.neck_search_bounds[1]} px"
+                        )
                     txt += (
                         "\n  Skin → stable depth:"
                         f" L {nma.mask_left_x} → {nma.left_x} px,"
@@ -2414,19 +2375,31 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 int(round(mouth_y / self.image.size[1] * (const.MAIN_IMAGE_HEIGHT - 1)))
             )
 
-        # Compute MediaPipe search bounds: mouth -> neck midpoint.
-        # The narrowest neck is between the chin and mid-cervical level,
-        # NOT between mouth and shoulders (that range includes the collar
-        # line where skin disappears -- the global minimum, not the neck).
+        # Bound the neck search to an anatomical band directly below the
+        # lowest FaceMesh row. Pose may shorten this range but cannot extend it
+        # toward the shoulders/collar.
         scan_start_y = None
         scan_end_y = None
-        if self.neck_midpoint and self.neck_midpoint.y is not None:
-            mouth_y = max(
-                self.neck_midpoint.mouth_left[1],
-                self.neck_midpoint.mouth_right[1],
+        arc_midpoint_y = None
+        self.neck_search_bounds = None
+        if self.neck_midpoint:
+            face_mesh_landmarks = (
+                self.face_mesh_debug.landmarks if self.face_mesh_debug is not None else None
             )
-            scan_start_y = round(mouth_y)
-            scan_end_y = round(self.neck_midpoint.y)
+            scan_start_y, scan_end_y = neck_search_bounds_from_face_landmarks(
+                chin=self.neck_midpoint.chin,
+                nose=self.neck_midpoint.nose,
+                image_height=self.image.size[1],
+                face_mesh_landmarks=face_mesh_landmarks,
+                pose_neck_y=self.neck_midpoint.y,
+            )
+            self.neck_search_bounds = (scan_start_y, scan_end_y)
+            if self.neck_midpoint.y is not None:
+                arc_midpoint_y = clamp(
+                    self.neck_midpoint.y,
+                    scan_start_y,
+                    scan_end_y - 1,
+                )
 
         if (
             self.portrait.skinmap
@@ -2444,7 +2417,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 float_max=self.portrait.floatValueMax,
                 scan_start_y=scan_start_y,
                 scan_end_y=scan_end_y,
-                neck_midpoint_y=self.neck_midpoint.y,
+                neck_midpoint_y=arc_midpoint_y,
                 circumference_multiplier=2.7,
                 n_samples=25,
                 hairmap=self.portrait.hairmap,

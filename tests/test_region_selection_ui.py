@@ -311,19 +311,11 @@ def test_panel_calculates_linear_and_surface_summaries(qapp):
         window.depthDisplayCombo.itemText(index)
         for index in range(window.depthDisplayCombo.count())
     } == {mode.value for mode in DepthDisplayMode}
-    assert window.depthContourStepSpin.value() == 3
+    assert window.depthContourStepSpin.value() == 4
     assert not window.depthContourStepSpin.isEnabled()
-    assert window.depthFocusRadiusSpin.value() == 2
-    assert not window.depthFocusRadiusSpin.isEnabled()
     window.depthDisplayCombo.setCurrentIndex(
         window.depthDisplayCombo.findData(DepthDisplayMode.COLOR_CONTOURS)
     )
     assert window.depthContourStepSpin.isEnabled()
-    assert not window.depthFocusRadiusSpin.isEnabled()
-    window.depthDisplayCombo.setCurrentIndex(
-        window.depthDisplayCombo.findData(DepthDisplayMode.CURSOR_BANDS)
-    )
-    assert not window.depthContourStepSpin.isEnabled()
-    assert window.depthFocusRadiusSpin.isEnabled()
     window.portrait = None
     window.close()

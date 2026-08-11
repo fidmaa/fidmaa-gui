@@ -14,9 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   zoom views, including raw silhouette edges, corrected depth points, and the
   measured neck arc.
 - Added a configurable contour step (1–8 raw depth levels), defaulting to every
-  third level, to reduce visual density without changing measurement data.
-- Added a cursor-relative depth-band display that assigns distinct colors to
-  exact values within a configurable ±1–8 range and dims everything else.
+  fourth level, to reduce visual density without changing measurement data.
 - Neck output now distinguishes the curved 3D surface polyline from its direct
   Euclidean chord and reports median-filtered straight-row surface vectors.
 - Added the `surface_vector_filtered` measurement alongside the existing direct
@@ -30,8 +28,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Remove the experimental cursor-depth-band display and explicitly calculate
+  contour boundaries from a 3×3 median map to suppress isolated depth noise.
 - Pass the semantic hair matte into neck-edge selection and increase automatic
   front-arc sampling from 10 to 25 points.
+- Bound automatic neck-row selection below the lowest FaceMesh landmark using
+  face scale, and expose the selected anatomical Y search band in the output.
 - Position teeth-centroid markers inside the aspect-fitted teeth-map rectangle,
   including its letterbox offsets, instead of treating the entire widget as
   image content.

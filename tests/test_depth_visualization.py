@@ -3,7 +3,6 @@ from PIL import Image
 
 from fidmaa_gui.depth_visualization import (
     render_depth_contour_overlay,
-    render_depth_focus_visualization,
     render_depth_visualization,
 )
 
@@ -39,28 +38,6 @@ def test_invalid_zero_depth_remains_black_and_is_excluded_from_range():
     assert visualization.high_raw == 244
 
 
-def test_cursor_depth_bands_color_only_nearby_exact_levels():
-    depth = Image.fromarray(
-        np.array([[99, 100, 101, 102, 103, 104, 105]], dtype=np.uint8),
-        mode="L",
-    )
-
-    visualization = render_depth_focus_visualization(depth, 102, radius=2)
-    colors = np.asarray(visualization.image)[0]
-
-    assert visualization.low_raw == 100
-    assert visualization.high_raw == 104
-    assert tuple(colors[3]) == (255, 255, 255)
-    assert len({tuple(color) for color in colors[1:6]}) == 5
-    assert colors[0, 0] == colors[0, 1] == colors[0, 2]
-    assert colors[6, 0] == colors[6, 1] == colors[6, 2]
-
-
-def test_cursor_depth_band_radius_must_be_positive():
-    with np.testing.assert_raises_regex(ValueError, "at least 1"):
-        render_depth_focus_visualization(Image.new("L", (3, 3), 100), 100, radius=0)
-
-
 def test_contours_mark_boundaries_between_median_filtered_raw_levels():
     values = np.tile(np.array([241, 241, 242, 242, 243, 243], dtype=np.uint8), (5, 1))
     depth = Image.fromarray(values, mode="L")
@@ -71,6 +48,16 @@ def test_contours_mark_boundaries_between_median_filtered_raw_levels():
     white_plain = np.all(plain == 255, axis=2).sum()
     white_contoured = np.all(contoured == 255, axis=2).sum()
     assert white_contoured > white_plain
+
+
+def test_contour_median_map_suppresses_isolated_depth_noise():
+    values = np.full((9, 9), 100, dtype=np.uint8)
+    values[4, 4] = 140
+    depth = Image.fromarray(values, mode="L")
+
+    overlay = np.asarray(render_depth_contour_overlay(depth, depth.size))
+
+    assert not overlay[..., 3].any()
 
 
 def test_contours_are_recomputed_as_one_pixel_lines_at_display_resolution():
