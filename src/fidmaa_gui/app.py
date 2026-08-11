@@ -1700,6 +1700,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 neck_depth_raw=neck_depth,
                 float_min=self.portrait.floatValueMin,
                 float_max=self.portrait.floatValueMax,
+                image_width=ph_w,
+                image_height=ph_h,
             )
             if tmd_result:
                 self.tmd_mm = tmd_result[0]
