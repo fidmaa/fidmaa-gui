@@ -1,0 +1,102 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag must match the version in pyproject.toml
+        # PyPI rejects a re-upload of an existing version, and it does so
+        # after the macOS bundle has already been built and attached. Fail in
+        # five seconds instead.
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          project=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          if [ "$tag" != "$project" ]; then
+            echo "::error::tag $GITHUB_REF_NAME implies version $tag, pyproject.toml says $project"
+            exit 1
+          fi
+          echo "releasing $project"
+
+  macos-app:
+    needs: check-version
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install libheif
+        # pyheif-iplweb's compiled extension dlopen()s libheif from the
+        # MacPorts prefix rather than resolving it at runtime.
+        run: |
+          brew install libheif
+          sudo mkdir -p /opt/local/lib
+          sudo ln -sf "$(brew --prefix libheif)/lib/libheif.1.dylib" /opt/local/lib/libheif.1.dylib
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+
+      - name: Install deps
+        run: uv sync
+
+      - name: Run tests
+        run: uv run pytest
+
+      - name: Build app bundle
+        run: |
+          uv run pyinstaller fidmaa_gui.spec
+          make macos-copy-files
+          make zip-app
+
+      - name: Attach the bundle to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes=$(cat <<'NOTES'
+          Apple Silicon (arm64) build — Intel Macs are not supported, the
+          runner that produces this bundle is arm64.
+
+          The app is neither signed nor notarized, so Gatekeeper refuses it on
+          first launch. Right-click the app and choose Open, or run
+          `xattr -dr com.apple.quarantine fidmaa_gui.app`.
+          NOTES
+          )
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/fidmaa_gui.app.zip --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --generate-notes \
+              --notes "$notes" \
+              dist/fidmaa_gui.app.zip
+          fi
+
+  pypi:
+    needs: check-version
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/fidmaa-gui
+    permissions:
+      # Required for PyPI trusted publishing; this is the OIDC token.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@a892a5a61159132606e93a2fa6f4358831b04d26 # v1.14.2
