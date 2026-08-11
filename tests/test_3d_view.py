@@ -59,9 +59,7 @@ class TestOpen3DViewProcessLifecycle:
 
     def test_show_3d_view_calls_pyvista_show(self):
         """_show_3d_view delegates to pyvista_show."""
-        with patch(
-            "fidmaa_simple_viewer.core.pyvista_show"
-        ) as mock_pyvista_show:
+        with patch("fidmaa_simple_viewer.core.pyvista_show") as mock_pyvista_show:
             from fidmaa_gui.app import _show_3d_view
 
             image = MagicMock()

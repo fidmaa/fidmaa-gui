@@ -1,4 +1,3 @@
-
 import pytest
 from PySide6.QtCore import QPoint
 

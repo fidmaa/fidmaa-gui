@@ -33,8 +33,7 @@ def test_surface_vector_filtered_is_stable_on_flat_surface():
     window = make_flat_surface_window()
 
     lengths = [
-        MainWindow.surface_vector_filtered(window, 10, 20, 41, 20, step)
-        for step in range(2, 8)
+        MainWindow.surface_vector_filtered(window, 10, 20, 41, 20, step) for step in range(2, 8)
     ]
 
     assert all(length is not None for length in lengths)

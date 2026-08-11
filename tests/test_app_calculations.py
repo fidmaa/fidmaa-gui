@@ -27,11 +27,7 @@ def get_depthmap_distance(value, float_min_value=None, float_max_value=None):
     """Replica of MainWindow.get_depthmap_distance for testing."""
     if float_min_value is None or float_max_value is None:
         return value
-    return (
-        100
-        * 1.0
-        / (float_max_value * value / 255 + float_min_value * (1 - value / 255))
-    )
+    return 100 * 1.0 / (float_max_value * value / 255 + float_min_value * (1 - value / 255))
 
 
 def how_many_pixels_per_mm_at_distance_on_big_image(distance, mm):
