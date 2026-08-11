@@ -131,3 +131,27 @@ dmypy.json
 src/fidmaa/depthmap.jpg
 #*
 \#*
+*~
+
+# Qt Creator per-user project state (personal paths, machine id)
+*.pyproject.user
+*.pro.user
+
+# Claude Code per-user settings
+.claude/settings.local.json
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# Linux
+.fuse_hidden*
+.directory
+.Trash-*
