@@ -1,6 +1,7 @@
 import math
 import os
 import sys
+from functools import partial
 from textwrap import dedent
 
 import numpy as np
@@ -18,6 +19,7 @@ from portrait_analyser.exceptions import (
 from portrait_analyser.incisor import (
     depth_raw_to_distance_cm,
     pixel_to_mm,
+    pixels_per_mm_at_distance,
     vector_length_3d,
 )
 from portrait_analyser.ios import IOSPortrait, load_image
@@ -30,18 +32,33 @@ from PySide6.QtCore import QObject, QPoint, QSettings, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QApplication,
+    QButtonGroup,
+    QComboBox,
+    QDockWidget,
     QFileDialog,
+    QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
     QSizePolicy,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
 from . import const, errors
 from .calculations import findPoint
+from .region_measurement import (
+    MeasurementError,
+    Region,
+    RegionMask,
+    RegionMeasurementEngine,
+    SelectionMode,
+)
 from .utils import (
     UILoaderMixin,
     clamp,
@@ -66,8 +83,19 @@ class MainWindow(UILoaderMixin, QMainWindow):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.region_a = None
+        self.region_b = None
+        self.region_measurement_result = None
+        self._region_target = None
+        self._last_region_target = "a"
+        self._region_drag_action = None
+        self._region_drag_start = None
+        self._region_drag_original = None
+        self._region_drag_anchor = None
         self.load_ui()
         self._create_zoom_panel()
+        self._create_region_measurement_panel()
+        self._create_tools_menu()
 
         self.filename = None
 
@@ -94,6 +122,421 @@ class MainWindow(UILoaderMixin, QMainWindow):
 
         self.redrawImage()
         self.redrawZoom()
+
+    def _create_region_measurement_panel(self):
+        self.regionDock = QDockWidget("Region measurement", self)
+        self.regionDock.setObjectName("regionMeasurementDock")
+        self.regionDock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(8, 8, 8, 8)
+
+        mode_row = QHBoxLayout()
+        self.regionModeGroup = QButtonGroup(self)
+        self.regionModeGroup.setExclusive(True)
+        for identifier, text in ((0, "Point"), (1, "Draw A"), (2, "Draw B")):
+            button = QPushButton(text)
+            button.setCheckable(True)
+            self.regionModeGroup.addButton(button, identifier)
+            mode_row.addWidget(button)
+            if identifier == 0:
+                button.setChecked(True)
+                self.pointModeButton = button
+            elif identifier == 1:
+                self.regionAButton = button
+            else:
+                self.regionBButton = button
+        layout.addLayout(mode_row)
+
+        self.regionModeACombo, self.regionMaskACombo = self._create_region_options(
+            layout, "Region A", SelectionMode.HIGHEST
+        )
+        self.regionModeBCombo, self.regionMaskBCombo = self._create_region_options(
+            layout, "Region B", SelectionMode.LOWEST
+        )
+
+        settings_group = QGroupBox("Sampling")
+        settings_form = QFormLayout(settings_group)
+        self.regionPercentileSpin = QSpinBox()
+        self.regionPercentileSpin.setRange(5, 20)
+        self.regionPercentileSpin.setValue(10)
+        self.regionPercentileSpin.setSuffix(" %")
+        settings_form.addRow("Candidate pool:", self.regionPercentileSpin)
+        self.regionVectorCountSpin = QSpinBox()
+        self.regionVectorCountSpin.setRange(5, 10)
+        self.regionVectorCountSpin.setValue(10)
+        settings_form.addRow("Profiles:", self.regionVectorCountSpin)
+        layout.addWidget(settings_group)
+
+        clear_button = QPushButton("Clear regions")
+        clear_button.clicked.connect(self.clear_region_measurement)
+        layout.addWidget(clear_button)
+
+        self.regionResultEdit = QPlainTextEdit()
+        self.regionResultEdit.setReadOnly(True)
+        self.regionResultEdit.setMinimumWidth(270)
+        self.regionResultEdit.setPlainText(
+            "Draw region A, then region B to calculate a measurement."
+        )
+        layout.addWidget(self.regionResultEdit, stretch=1)
+
+        self.regionDock.setWidget(panel)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.regionDock)
+
+        self.regionModeGroup.idClicked.connect(self._set_region_interaction_mode)
+        for widget in (
+            self.regionModeACombo,
+            self.regionMaskACombo,
+            self.regionModeBCombo,
+            self.regionMaskBCombo,
+        ):
+            widget.currentIndexChanged.connect(self._region_settings_changed)
+        self.regionPercentileSpin.valueChanged.connect(self._region_settings_changed)
+        self.regionVectorCountSpin.valueChanged.connect(self._region_settings_changed)
+
+    def _create_region_options(self, parent_layout, title, default_mode):
+        group = QGroupBox(title)
+        form = QFormLayout(group)
+        mode_combo = QComboBox()
+        for mode in SelectionMode:
+            mode_combo.addItem(mode.value, mode)
+        mode_tooltips = {
+            SelectionMode.HIGHEST: "Select the candidate pool nearest to the camera.",
+            SelectionMode.LOWEST: "Select the candidate pool farthest from the camera.",
+            SelectionMode.FLATTEST: (
+                "Reject extreme depths, then select the smallest local 3D plane error."
+            ),
+        }
+        for index, mode in enumerate(SelectionMode):
+            mode_combo.setItemData(index, mode_tooltips[mode], Qt.ToolTipRole)
+        mode_combo.setCurrentIndex(mode_combo.findData(default_mode))
+        mask_combo = QComboBox()
+        for region_mask in RegionMask:
+            mask_combo.addItem(region_mask.value, region_mask)
+        mask_combo.setToolTip("Optionally restrict candidate pixels to the detected teeth mask.")
+        form.addRow("Selector:", mode_combo)
+        form.addRow("Mask:", mask_combo)
+        parent_layout.addWidget(group)
+        return mode_combo, mask_combo
+
+    def _create_tools_menu(self):
+        tools_menu = self.menuBar().addMenu("&Tools")
+        self.pixelToolAction = tools_menu.addAction("Pixel tool")
+        self.pixelToolAction.setShortcut(QtGui.QKeySequence(Qt.Key_P))
+        self.pixelToolAction.setShortcutContext(Qt.WindowShortcut)
+        self.pixelToolAction.setStatusTip("Return to the original single-pixel tool")
+        self.pixelToolAction.triggered.connect(self._activate_pixel_tool)
+
+        tools_menu.addSeparator()
+        action_details = (
+            (SelectionMode.HIGHEST, Qt.Key_H, "Highest region tool"),
+            (SelectionMode.LOWEST, Qt.Key_L, "Lowest region tool"),
+            (SelectionMode.FLATTEST, Qt.Key_F, "Flattest region tool"),
+        )
+        self.regionToolActions = {}
+        for mode, key, text in action_details:
+            action = tools_menu.addAction(text)
+            action.setShortcut(QtGui.QKeySequence(key))
+            action.setShortcutContext(Qt.WindowShortcut)
+            action.setStatusTip(f"Use {mode.value.lower()} candidates for the active region")
+            action.triggered.connect(partial(self._activate_region_selector, mode))
+            self.regionToolActions[mode] = action
+
+    def _activate_pixel_tool(self, *args):
+        self.pointModeButton.setChecked(True)
+        self._set_region_interaction_mode(0)
+
+    def _activate_region_selector(self, mode, *args):
+        target = self._region_target
+        if target is None:
+            if self.region_a is None:
+                target = "a"
+            elif self.region_b is None:
+                target = "b"
+            else:
+                target = self._last_region_target
+
+        if target == "a":
+            combo = self.regionModeACombo
+            self.regionAButton.setChecked(True)
+            self._set_region_interaction_mode(1)
+        else:
+            combo = self.regionModeBCombo
+            self.regionBButton.setChecked(True)
+            self._set_region_interaction_mode(2)
+        combo.setCurrentIndex(combo.findData(mode))
+
+    def _set_region_interaction_mode(self, identifier):
+        self._region_target = {0: None, 1: "a", 2: "b"}[identifier]
+        if self._region_target is not None:
+            self._last_region_target = self._region_target
+        self.ui.imageLabel.setCursor(Qt.CursorShape.CrossCursor)
+
+    def _active_region(self):
+        if self._region_target == "a":
+            return self.region_a
+        if self._region_target == "b":
+            return self.region_b
+        return None
+
+    def _set_active_region(self, region):
+        if self._region_target == "a":
+            self.region_a = region
+        elif self._region_target == "b":
+            self.region_b = region
+
+    @staticmethod
+    def _region_contains(region, x, y):
+        return region.left <= x <= region.right and region.top <= y <= region.bottom
+
+    @staticmethod
+    def _find_region_resize_anchor(region, x, y, tolerance=8):
+        corners_and_anchors = (
+            ((region.left, region.top), (region.right, region.bottom)),
+            ((region.right, region.top), (region.left, region.bottom)),
+            ((region.left, region.bottom), (region.right, region.top)),
+            ((region.right, region.bottom), (region.left, region.top)),
+        )
+        for corner, anchor in corners_and_anchors:
+            if math.hypot(x - corner[0], y - corner[1]) <= tolerance:
+                return anchor
+        return None
+
+    def _begin_region_drag(self, point):
+        if self._region_target is None:
+            return
+        x = float(clamp(point.x(), 0, const.MAIN_IMAGE_WIDTH))
+        y = float(clamp(point.y(), 0, const.MAIN_IMAGE_HEIGHT))
+        self._region_drag_start = (x, y)
+        self._region_drag_original = self._active_region()
+        self._region_drag_anchor = None
+
+        region = self._region_drag_original
+        if region is not None:
+            anchor = self._find_region_resize_anchor(region, x, y)
+            if anchor is not None:
+                self._region_drag_action = "resize"
+                self._region_drag_anchor = anchor
+                return
+            if self._region_contains(region, x, y):
+                self._region_drag_action = "move"
+                return
+        self._region_drag_action = "draw"
+        self._set_active_region(Region(x, y, x, y))
+
+    def _drag_region(self, point):
+        if self._region_drag_action is None or self._region_target is None:
+            return
+        x = float(clamp(point.x(), 0, const.MAIN_IMAGE_WIDTH))
+        y = float(clamp(point.y(), 0, const.MAIN_IMAGE_HEIGHT))
+
+        if self._region_drag_action == "move":
+            original = self._region_drag_original
+            start_x, start_y = self._region_drag_start
+            dx = x - start_x
+            dy = y - start_y
+            left = min(
+                max(0.0, original.left + dx),
+                const.MAIN_IMAGE_WIDTH - original.width,
+            )
+            top = min(
+                max(0.0, original.top + dy),
+                const.MAIN_IMAGE_HEIGHT - original.height,
+            )
+            region = Region(left, top, left + original.width, top + original.height)
+        elif self._region_drag_action == "resize":
+            anchor_x, anchor_y = self._region_drag_anchor
+            region = Region(anchor_x, anchor_y, x, y)
+        else:
+            start_x, start_y = self._region_drag_start
+            if QApplication.keyboardModifiers() & Qt.ShiftModifier:
+                available_x = const.MAIN_IMAGE_WIDTH - start_x if x >= start_x else start_x
+                available_y = const.MAIN_IMAGE_HEIGHT - start_y if y >= start_y else start_y
+                side = min(max(abs(x - start_x), abs(y - start_y)), available_x, available_y)
+                x = start_x + side * (1 if x >= start_x else -1)
+                y = start_y + side * (1 if y >= start_y else -1)
+            region = Region(start_x, start_y, x, y)
+
+        self._set_active_region(region)
+        self.region_measurement_result = None
+        self._redraw_region_overlay()
+
+    def _finish_region_drag(self, point):
+        if self._region_drag_action is None or self._region_target is None:
+            return
+        self._drag_region(point)
+        region = self._active_region()
+        if region is None or region.width < 2 or region.height < 2:
+            self._set_active_region(self._region_drag_original)
+
+        completed_target = self._region_target
+        self._region_drag_action = None
+        self._region_drag_start = None
+        self._region_drag_original = None
+        self._region_drag_anchor = None
+
+        if completed_target == "a" and self.region_a is not None and self.region_b is None:
+            self.regionBButton.setChecked(True)
+            self._set_region_interaction_mode(2)
+
+        self._calculate_region_measurement()
+        self._redraw_region_overlay()
+
+    def _region_settings_changed(self, *args):
+        self.region_measurement_result = None
+        self._calculate_region_measurement()
+        self._redraw_region_overlay()
+
+    def clear_region_measurement(self, *args, repaint=True):
+        self.region_a = None
+        self.region_b = None
+        self.region_measurement_result = None
+        self._region_target = None
+        self._last_region_target = "a"
+        self._region_drag_action = None
+        if hasattr(self, "pointModeButton"):
+            self.pointModeButton.setChecked(True)
+        if hasattr(self, "regionResultEdit"):
+            self.regionResultEdit.setPlainText(
+                "Draw region A, then region B to calculate a measurement."
+            )
+        if repaint:
+            self._redraw_region_overlay()
+
+    def _calculate_region_measurement(self):
+        if not hasattr(self, "regionResultEdit"):
+            return
+        if self.region_a is None or self.region_b is None:
+            missing = "A" if self.region_a is None else "B"
+            self.regionResultEdit.setPlainText(f"Draw region {missing} to calculate a measurement.")
+            return
+        if self.filtered_depthmap is None or not hasattr(self, "image"):
+            self.regionResultEdit.setPlainText("Load an image with depth data first.")
+            return
+
+        mode_a = SelectionMode(self.regionModeACombo.currentText())
+        mode_b = SelectionMode(self.regionModeBCombo.currentText())
+        mask_a = RegionMask(self.regionMaskACombo.currentText())
+        mask_b = RegionMask(self.regionMaskBCombo.currentText())
+        engine = RegionMeasurementEngine(
+            filtered_depthmap=self.filtered_depthmap,
+            display_size=(const.MAIN_IMAGE_WIDTH, const.MAIN_IMAGE_HEIGHT),
+            image_size=self.image.size,
+            depth_to_cm=self.get_depthmap_distance,
+            pixels_per_mm=pixels_per_mm_at_distance,
+            surface_length=lambda start, end: self.surface_vector_filtered(
+                start[0], start[1], end[0], end[1], 3
+            ),
+            teethmap=self.portrait.teethmap if self.portrait else None,
+        )
+        try:
+            result = engine.measure(
+                self.region_a,
+                self.region_b,
+                mode_a=mode_a,
+                mode_b=mode_b,
+                mask_a=mask_a,
+                mask_b=mask_b,
+                percentile=self.regionPercentileSpin.value(),
+                vector_count=self.regionVectorCountSpin.value(),
+            )
+        except MeasurementError as error:
+            self.region_measurement_result = None
+            self.regionResultEdit.setPlainText(f"Cannot calculate measurement:\n{error}")
+            return
+
+        self.region_measurement_result = result
+        requested = self.regionVectorCountSpin.value()
+        linear = result.linear_stats()
+        surface = result.surface_stats()
+        valid_surface_count = sum(sample.surface_mm is not None for sample in result.samples)
+        lines = [
+            f"A: {mode_a.value}, mask={mask_a.value}",
+            f"B: {mode_b.value}, mask={mask_b.value}",
+            f"Candidate pool: {self.regionPercentileSpin.value()}%",
+            f"Requested profiles: {requested}",
+            "",
+        ]
+        if linear is None:
+            lines.append(f"Linear 3D: insufficient profiles (n={len(result.samples)})")
+        else:
+            lines.append(
+                "Linear 3D: "
+                f"{linear.mean_mm / 10:.2f} ± {linear.sample_sd_mm / 10:.2f} cm "
+                f"(n={linear.count})"
+            )
+        if surface is None:
+            lines.append(f"Surface 3D: insufficient valid profiles (n={valid_surface_count})")
+        else:
+            lines.append(
+                "Surface 3D: "
+                f"{surface.mean_mm / 10:.2f} ± {surface.sample_sd_mm / 10:.2f} cm "
+                f"(n={surface.count}, step=3 px)"
+            )
+        if valid_surface_count < requested:
+            lines.extend(
+                (
+                    "",
+                    f"Warning: {requested - valid_surface_count} surface profile(s) crossed invalid depth data.",
+                )
+            )
+        self.regionResultEdit.setPlainText("\n".join(lines))
+
+    def _redraw_region_overlay(self):
+        if self.portrait:
+            self.redrawImage(force=True)
+
+    def _paint_region_overlay(self, painter):
+        painter.save()
+        try:
+            colors = {
+                "a": QColor(0, 190, 255, 220),
+                "b": QColor(255, 0, 170, 220),
+            }
+            result = self.region_measurement_result
+            if result is not None:
+                line_pen = QtGui.QPen(QColor(255, 255, 255, 125), 1)
+                painter.setPen(line_pen)
+                painter.setBrush(Qt.NoBrush)
+                for sample in result.samples:
+                    painter.drawLine(
+                        QPoint(sample.start.x, sample.start.y),
+                        QPoint(sample.end.x, sample.end.y),
+                    )
+                for key, candidates in (
+                    ("a", result.candidates_a),
+                    ("b", result.candidates_b),
+                ):
+                    painter.setPen(Qt.NoPen)
+                    painter.setBrush(colors[key])
+                    for candidate in candidates:
+                        painter.drawEllipse(QPoint(candidate.x, candidate.y), 3, 3)
+
+            for key, region in (("a", self.region_a), ("b", self.region_b)):
+                if region is None:
+                    continue
+                color = colors[key]
+                painter.setPen(QtGui.QPen(color, 2))
+                painter.setBrush(QColor(color.red(), color.green(), color.blue(), 35))
+                painter.drawRect(
+                    int(region.left),
+                    int(region.top),
+                    max(1, int(region.width)),
+                    max(1, int(region.height)),
+                )
+                if self._region_target == key:
+                    painter.setPen(Qt.NoPen)
+                    painter.setBrush(color)
+                    for handle_x, handle_y in (
+                        (region.left, region.top),
+                        (region.right, region.top),
+                        (region.left, region.bottom),
+                        (region.right, region.bottom),
+                    ):
+                        painter.drawRect(int(handle_x) - 4, int(handle_y) - 4, 8, 8)
+        finally:
+            painter.restore()
 
     def _create_zoom_panel(self):
         # Take the UI widget out of central and wrap it with a zoom panel below
@@ -571,6 +1014,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
     def redrawImage(self, *args, **kw):
         if not self.portrait:
             return
+        force = kw.pop("force", False)
 
         mouse_x = x = self.ui.xValue.value()
         y = mouse_y = self.ui.yValue.value()
@@ -585,15 +1029,19 @@ class MainWindow(UILoaderMixin, QMainWindow):
         show_face_mesh = self.ui.showFaceMeshLandmarksCheckBox.isChecked()
         show_segmentation = self.ui.showSegmentationDebugCheckBox.isChecked()
 
-        if self.last_click_x is not None and (
-            self.last_click_x == mouse_x
-            and self.last_click_y == mouse_y
-            and self.last_angle == angle
-            and self.last_show_centroids == show_centroids
-            and self.last_show_neck_arc == show_neck_arc
-            and self.last_show_landmarks == show_landmarks
-            and self.last_show_face_mesh == show_face_mesh
-            and self.last_show_segmentation == show_segmentation
+        if (
+            not force
+            and self.last_click_x is not None
+            and (
+                self.last_click_x == mouse_x
+                and self.last_click_y == mouse_y
+                and self.last_angle == angle
+                and self.last_show_centroids == show_centroids
+                and self.last_show_neck_arc == show_neck_arc
+                and self.last_show_landmarks == show_landmarks
+                and self.last_show_face_mesh == show_face_mesh
+                and self.last_show_segmentation == show_segmentation
+            )
         ):
             return
 
@@ -973,6 +1421,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
 
                 painter.setBrush(Qt.NoBrush)
 
+            self._paint_region_overlay(painter)
             painter.setPen(QColor(0, 0, 255, 127))
 
             # Calculate 2 points at the edge of the image, using the angle.
@@ -1365,6 +1814,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
 
     def _loadImage(self, fileName):
         self.filename = fileName
+        self.clear_region_measurement(repaint=False)
 
         try:
             self.portrait: IOSPortrait = load_image(self.filename, use_exif=False)
@@ -1701,6 +2151,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
             self._loadImage(fileName)
 
     def setMidlinePoint(self, point, *args, **kw):
+        if self._region_target is not None:
+            return
         self.ui.xValue.setValue(point.x())
         self.ui.yValue.setValue(point.y())
         self.redrawImage()
@@ -1744,7 +2196,10 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.ui.open3DViewButton.clicked.connect(self.open3DView)
         self.ui.imageLabel.clicked.connect(self.setMidlinePoint)
         self.ui.imageLabel.setMouseTracking(True)
-        self.ui.imageLabel.mouseMoveEvent = self.redrawZoom
+        self.ui.imageLabel.pointerMoved.connect(self.redrawZoom)
+        self.ui.imageLabel.pressed.connect(self._begin_region_drag)
+        self.ui.imageLabel.dragged.connect(self._drag_region)
+        self.ui.imageLabel.released.connect(self._finish_region_drag)
         self.ui.imageLabel.setCursor(Qt.CursorShape.CrossCursor)
         self.ui.chartLabel.clicked.connect(self.setMidlineY)
 
