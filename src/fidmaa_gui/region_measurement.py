@@ -152,7 +152,7 @@ class RegionMeasurementEngine:
         display_size: tuple[int, int],
         image_size: tuple[int, int],
         depth_to_cm: Callable[[np.ndarray | float], np.ndarray | float],
-        pixels_per_mm: Callable[[np.ndarray | float], np.ndarray | float],
+        pixels_per_mm: Callable[[np.ndarray | float], np.ndarray | float | None],
         surface_length: Callable[[tuple[int, int], tuple[int, int]], float | None],
         teethmap: Image.Image | None = None,
     ) -> None:
@@ -367,11 +367,26 @@ class RegionMeasurementEngine:
         image_width, image_height = self.image_size
         image_x = x * image_width / display_width
         image_y = y * image_height / display_height
-        pixels_per_mm = np.asarray(self.pixels_per_mm(z_cm), dtype=np.float64)
+        pixels_per_mm = self._pixels_per_mm_array(z_cm)
         with np.errstate(divide="ignore", invalid="ignore"):
             x_mm = (image_x - image_width / 2.0) / pixels_per_mm
             y_mm = (image_y - image_height / 2.0) / pixels_per_mm
         return x_mm, y_mm, z_cm * 10.0
+
+    def _pixels_per_mm_array(self, z_cm: np.ndarray) -> np.ndarray:
+        """Evaluate scalar or vectorized camera-calibration callables safely."""
+        try:
+            converted = np.asarray(self.pixels_per_mm(z_cm), dtype=np.float64)
+            if converted.shape == z_cm.shape:
+                return converted
+        except (TypeError, ValueError):
+            pass
+
+        def convert(value):
+            result = self.pixels_per_mm(float(value))
+            return np.nan if result is None else result
+
+        return np.vectorize(convert, otypes=[np.float64])(z_cm)
 
     def _flatness_score(
         self,

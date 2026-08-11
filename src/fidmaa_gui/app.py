@@ -304,6 +304,27 @@ class MainWindow(UILoaderMixin, QMainWindow):
             action.triggered.connect(partial(self._activate_region_selector, mode))
             self.regionToolActions[mode] = action
 
+    def keyPressEvent(self, event):
+        """Keep the single-key measurement tools reliable across Qt platforms."""
+        if event.modifiers() == Qt.NoModifier:
+            if event.key() == Qt.Key_P:
+                self.pixelToolAction.trigger()
+                event.accept()
+                return
+
+            mode_by_key = {
+                Qt.Key_H: SelectionMode.HIGHEST,
+                Qt.Key_L: SelectionMode.LOWEST,
+                Qt.Key_F: SelectionMode.FLATTEST,
+            }
+            mode = mode_by_key.get(event.key())
+            if mode is not None:
+                self.regionToolActions[mode].trigger()
+                event.accept()
+                return
+
+        super().keyPressEvent(event)
+
     def _activate_pixel_tool(self, *args):
         self.regionSelectionButton.setChecked(False)
 

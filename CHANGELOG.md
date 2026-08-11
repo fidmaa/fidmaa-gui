@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-08-11
+
 ### Added
 
 - Added an `Area (uniform)` region selector for surfaces without a single
@@ -31,12 +33,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- Updated the `portrait-analyser` dependency to the PyPI `0.6.x` release line.
 - Changed measurement defaults to a 20 px patch radius and 5% candidate pool,
   and increased the supported profile count from 10 to 30 (default remains
   10).
 
 ### Fixed
 
+- Adapt region measurements to the scalar, calibration-range-aware conversion
+  API in `portrait-analyser 0.6.0`.
+- Make the single-key `H`, `L`, `F`, and `P` tools reliable across Qt platform
+  shortcut implementations.
 - Remove the experimental cursor-depth-band display and explicitly calculate
   contour boundaries from a 3×3 median map to suppress isolated depth noise.
 - Pass the semantic hair matte into neck-edge selection and increase automatic

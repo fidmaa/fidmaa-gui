@@ -16,7 +16,7 @@ from PIL import Image
 from fidmaa_gui.app import MainWindow
 
 
-def make_flat_surface_window(photo_width=480, photo_height=640, fill_value=100):
+def make_flat_surface_window(photo_width=480, photo_height=640, fill_value=160):
     depthmap = Image.new("L", (photo_width, photo_height), fill_value)
     return SimpleNamespace(
         depthmap=depthmap,

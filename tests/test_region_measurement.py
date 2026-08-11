@@ -127,6 +127,22 @@ def test_highest_and_lowest_select_absolute_depth_extremes():
     assert all(point.x >= 13 for point in lowest)
 
 
+def test_scalar_calibration_callable_is_applied_to_region_arrays():
+    engine = make_engine(np.full((11, 11), 50, dtype=np.uint8))
+    engine.pixels_per_mm = lambda distance: 2.0 if 15.0 <= distance <= 80.0 else None
+
+    candidates = engine.select_candidates(
+        Region(0, 0, 11, 11),
+        mode=SelectionMode.HIGHEST,
+        mask=RegionMask.NONE,
+        percentile=10,
+        count=5,
+    )
+
+    assert len(candidates) == 5
+    assert all(np.isfinite(point.point_3d_mm).all() for point in candidates)
+
+
 def test_area_selector_is_uniform_and_ignores_depth_shape():
     y, x = np.indices((41, 41), dtype=np.float64)
     first_depth = 40 + x + 2 * y
