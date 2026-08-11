@@ -250,7 +250,7 @@ requires-dist = [
     { name = "opencv-python", specifier = ">=4.6.0.66,<5" },
     { name = "piexif", specifier = ">=1.1.3,<2" },
     { name = "pillow", specifier = ">=10.2.0,<11" },
-    { name = "portrait-analyser", extras = ["pose"], editable = "../portrait-analyser" },
+    { name = "portrait-analyser", extras = ["pose"], specifier = ">=0.4.0,<0.5" },
     { name = "pyheif-iplweb", specifier = ">=0.7.1.dev1176" },
     { name = "pyside6", specifier = ">=6.6.2,<7" },
     { name = "pyvista", specifier = ">=0.45,<0.48" },
@@ -646,7 +646,7 @@ wheels = [
 [[package]]
 name = "portrait-analyser"
 version = "0.4.0"
-source = { editable = "../portrait-analyser" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "mediapipe" },
     { name = "numpy" },
@@ -655,26 +655,15 @@ dependencies = [
     { name = "pyheif", marker = "sys_platform == 'linux'" },
     { name = "pyheif-iplweb", marker = "sys_platform == 'darwin'" },
 ]
+sdist = { url = "https://files.pythonhosted.org/packages/8a/0b/475f0c4d3d82909ebefcc04d2631b72b94a6edccb21a19d48d1a8ef52c04/portrait_analyser-0.4.0.tar.gz", hash = "sha256:d6ae2aa4e8ebd0b085b4274f2838cebaba37d115ad3e109b367c7643d3cf3797", size = 3323542, upload-time = "2026-08-11T16:55:39.143Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4d/f5/b06d107a34eb5dee77472778772fdc5100a2a55b62ce0b99ccacd471d72d/portrait_analyser-0.4.0-py3-none-any.whl", hash = "sha256:cd7b5264518651b24dcabab1eb011803f4cabdd2f5e7b5e826924ae399baf69a", size = 42034, upload-time = "2026-08-11T16:55:35.625Z" },
+]
 
 [package.optional-dependencies]
 pose = [
     { name = "mediapipe" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "mediapipe", specifier = ">=0.10.0" },
-    { name = "mediapipe", marker = "extra == 'pose'", specifier = ">=0.10.30" },
-    { name = "numpy", specifier = ">=1.26.4" },
-    { name = "piexif", specifier = ">=1.1.3" },
-    { name = "pillow", specifier = ">=10.2.0" },
-    { name = "pyheif", marker = "sys_platform == 'linux'", specifier = ">=0.7.1" },
-    { name = "pyheif-iplweb", marker = "sys_platform == 'darwin'", specifier = ">=0.7.1.dev1176" },
-]
-provides-extras = ["pose"]
-
-[package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=8.1.1" }]
 
 [[package]]
 name = "prompt-toolkit"

@@ -33,9 +33,6 @@ dev = [
 [project.scripts]
 fidmaa_gui = "fidmaa_gui.entrypoints:run"
 
-[tool.uv.sources]
-portrait-analyser = { path = "../portrait-analyser", editable = true }
-
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
