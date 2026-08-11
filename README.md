@@ -22,9 +22,10 @@ make all  # runs clean + pyinstaller + copy files
 The **Region measurement** dock provides a robust alternative to selecting two
 individual depth pixels:
 
-1. Choose **Draw A** and drag a rectangle over the first anatomical area.
-2. Draw region B when the application switches to **Draw B**. Hold `Shift` to
-   constrain a new region to a square.
+1. Choose **Draw A**, press at the intended centre, and drag to set the radius
+   of the circular contact area.
+2. Draw region B when the application switches to **Draw B**. Circles can be
+   moved by dragging inside them and resized from the perimeter handle.
 3. Choose `Highest` (nearest to the camera), `Lowest` (farthest from the
    camera), or `Flattest` independently for both regions. A teeth mask can be
    applied when it is available.
@@ -36,4 +37,8 @@ commands are available from the **Tools** menu.
 The best 5–20% of pixels form each candidate pool. The application selects
 5–10 spatially distributed endpoint pairs and reports mean ± sample standard
 deviation for both straight 3D distance and median-filtered surface distance.
-Rectangles can be moved or resized by dragging a corner.
+
+The depth display can remain in raw grayscale or use locally stretched Viridis
+colours. An optional contour mode outlines boundaries between median-smoothed
+raw depth levels. These modes affect only visualization—the measurement engine
+continues to use the original depth values.

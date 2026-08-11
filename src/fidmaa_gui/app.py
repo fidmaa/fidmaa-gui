@@ -5,7 +5,7 @@ from functools import partial
 from textwrap import dedent
 
 import numpy as np
-from PIL import Image, ImageFile, ImageFilter
+from PIL import ImageFile
 from portrait_analyser.depth_sampling import (
     measure_filtered_surface_length,
     median_filter_depthmap,
@@ -52,6 +52,7 @@ from PySide6.QtWidgets import (
 
 from . import const, errors
 from .calculations import findPoint
+from .depth_visualization import DepthDisplayMode, render_depth_visualization
 from .region_measurement import (
     MeasurementError,
     Region,
@@ -92,6 +93,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self._region_drag_start = None
         self._region_drag_original = None
         self._region_drag_anchor = None
+        self.last_zoom_x = 0
+        self.last_zoom_y = 0
         self.load_ui()
         self._create_zoom_panel()
         self._create_region_measurement_panel()
@@ -169,6 +172,20 @@ class MainWindow(UILoaderMixin, QMainWindow):
         settings_form.addRow("Profiles:", self.regionVectorCountSpin)
         layout.addWidget(settings_group)
 
+        depth_group = QGroupBox("Depth display")
+        depth_form = QFormLayout(depth_group)
+        self.depthDisplayCombo = QComboBox()
+        for mode in DepthDisplayMode:
+            self.depthDisplayCombo.addItem(mode.value, mode)
+        self.depthDisplayCombo.setCurrentIndex(
+            self.depthDisplayCombo.findData(DepthDisplayMode.COLOR)
+        )
+        self.depthDisplayCombo.setToolTip(
+            "Display-only enhancement; measurement data is never remapped."
+        )
+        depth_form.addRow("Mode:", self.depthDisplayCombo)
+        layout.addWidget(depth_group)
+
         clear_button = QPushButton("Clear regions")
         clear_button.clicked.connect(self.clear_region_measurement)
         layout.addWidget(clear_button)
@@ -194,6 +211,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
             widget.currentIndexChanged.connect(self._region_settings_changed)
         self.regionPercentileSpin.valueChanged.connect(self._region_settings_changed)
         self.regionVectorCountSpin.valueChanged.connect(self._region_settings_changed)
+        self.depthDisplayCombo.currentIndexChanged.connect(self._depth_display_changed)
 
     def _create_region_options(self, parent_layout, title, default_mode):
         group = QGroupBox(title)
@@ -288,20 +306,32 @@ class MainWindow(UILoaderMixin, QMainWindow):
 
     @staticmethod
     def _region_contains(region, x, y):
-        return region.left <= x <= region.right and region.top <= y <= region.bottom
+        return region.contains(x, y)
 
     @staticmethod
-    def _find_region_resize_anchor(region, x, y, tolerance=8):
-        corners_and_anchors = (
-            ((region.left, region.top), (region.right, region.bottom)),
-            ((region.right, region.top), (region.left, region.bottom)),
-            ((region.left, region.bottom), (region.right, region.top)),
-            ((region.right, region.bottom), (region.left, region.top)),
-        )
-        for corner, anchor in corners_and_anchors:
-            if math.hypot(x - corner[0], y - corner[1]) <= tolerance:
-                return anchor
+    def _find_region_resize_center(region, x, y, tolerance=8):
+        center_x, center_y = region.center
+        distance = math.hypot(x - center_x, y - center_y)
+        if abs(distance - region.radius) <= tolerance:
+            return region.center
         return None
+
+    @staticmethod
+    def _circle_region(center_x, center_y, edge_x, edge_y):
+        radius = math.hypot(edge_x - center_x, edge_y - center_y)
+        radius = min(
+            radius,
+            center_x,
+            const.MAIN_IMAGE_WIDTH - center_x,
+            center_y,
+            const.MAIN_IMAGE_HEIGHT - center_y,
+        )
+        return Region(
+            center_x - radius,
+            center_y - radius,
+            center_x + radius,
+            center_y + radius,
+        )
 
     def _begin_region_drag(self, point):
         if self._region_target is None:
@@ -314,10 +344,10 @@ class MainWindow(UILoaderMixin, QMainWindow):
 
         region = self._region_drag_original
         if region is not None:
-            anchor = self._find_region_resize_anchor(region, x, y)
-            if anchor is not None:
+            center = self._find_region_resize_center(region, x, y)
+            if center is not None:
                 self._region_drag_action = "resize"
-                self._region_drag_anchor = anchor
+                self._region_drag_anchor = center
                 return
             if self._region_contains(region, x, y):
                 self._region_drag_action = "move"
@@ -336,27 +366,26 @@ class MainWindow(UILoaderMixin, QMainWindow):
             start_x, start_y = self._region_drag_start
             dx = x - start_x
             dy = y - start_y
-            left = min(
-                max(0.0, original.left + dx),
-                const.MAIN_IMAGE_WIDTH - original.width,
+            center_x = min(
+                max(original.radius, original.center[0] + dx),
+                const.MAIN_IMAGE_WIDTH - original.radius,
             )
-            top = min(
-                max(0.0, original.top + dy),
-                const.MAIN_IMAGE_HEIGHT - original.height,
+            center_y = min(
+                max(original.radius, original.center[1] + dy),
+                const.MAIN_IMAGE_HEIGHT - original.radius,
             )
-            region = Region(left, top, left + original.width, top + original.height)
+            region = Region(
+                center_x - original.radius,
+                center_y - original.radius,
+                center_x + original.radius,
+                center_y + original.radius,
+            )
         elif self._region_drag_action == "resize":
-            anchor_x, anchor_y = self._region_drag_anchor
-            region = Region(anchor_x, anchor_y, x, y)
+            center_x, center_y = self._region_drag_anchor
+            region = self._circle_region(center_x, center_y, x, y)
         else:
-            start_x, start_y = self._region_drag_start
-            if QApplication.keyboardModifiers() & Qt.ShiftModifier:
-                available_x = const.MAIN_IMAGE_WIDTH - start_x if x >= start_x else start_x
-                available_y = const.MAIN_IMAGE_HEIGHT - start_y if y >= start_y else start_y
-                side = min(max(abs(x - start_x), abs(y - start_y)), available_x, available_y)
-                x = start_x + side * (1 if x >= start_x else -1)
-                y = start_y + side * (1 if y >= start_y else -1)
-            region = Region(start_x, start_y, x, y)
+            center_x, center_y = self._region_drag_start
+            region = self._circle_region(center_x, center_y, x, y)
 
         self._set_active_region(region)
         self.region_measurement_result = None
@@ -367,7 +396,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
             return
         self._drag_region(point)
         region = self._active_region()
-        if region is None or region.width < 2 or region.height < 2:
+        if region is None or region.radius < 2:
             self._set_active_region(self._region_drag_original)
 
         completed_target = self._region_target
@@ -387,6 +416,9 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.region_measurement_result = None
         self._calculate_region_measurement()
         self._redraw_region_overlay()
+
+    def _depth_display_changed(self, *args):
+        self.redrawZoom()
 
     def clear_region_measurement(self, *args, repaint=True):
         self.region_a = None
@@ -452,8 +484,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
         surface = result.surface_stats()
         valid_surface_count = sum(sample.surface_mm is not None for sample in result.samples)
         lines = [
-            f"A: {mode_a.value}, mask={mask_a.value}",
-            f"B: {mode_b.value}, mask={mask_b.value}",
+            f"A: {mode_a.value}, mask={mask_a.value}, radius={self.region_a.radius:.0f} px",
+            f"B: {mode_b.value}, mask={mask_b.value}, radius={self.region_b.radius:.0f} px",
             f"Candidate pool: {self.regionPercentileSpin.value()}%",
             f"Requested profiles: {requested}",
             "",
@@ -519,7 +551,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 color = colors[key]
                 painter.setPen(QtGui.QPen(color, 2))
                 painter.setBrush(QColor(color.red(), color.green(), color.blue(), 35))
-                painter.drawRect(
+                painter.drawEllipse(
                     int(region.left),
                     int(region.top),
                     max(1, int(region.width)),
@@ -528,13 +560,15 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 if self._region_target == key:
                     painter.setPen(Qt.NoPen)
                     painter.setBrush(color)
-                    for handle_x, handle_y in (
-                        (region.left, region.top),
-                        (region.right, region.top),
-                        (region.left, region.bottom),
-                        (region.right, region.bottom),
-                    ):
-                        painter.drawRect(int(handle_x) - 4, int(handle_y) - 4, 8, 8)
+                    handle_x = region.right
+                    handle_y = region.center[1]
+                    painter.drawEllipse(QPoint(int(handle_x), int(handle_y)), 5, 5)
+                painter.setPen(color)
+                painter.setBrush(Qt.NoBrush)
+                painter.drawText(
+                    QPoint(int(region.center[0]) + 6, int(region.center[1]) - 6),
+                    key.upper(),
+                )
         finally:
             painter.restore()
 
@@ -611,13 +645,26 @@ class MainWindow(UILoaderMixin, QMainWindow):
         mouse_x=None,
         mouse_y=None,
         ok_value_threshold=100,
+        depth_visualization=False,
     ):
         w = ui_element.width()
         h = ui_element.height()
         if w < 1 or h < 1:
             return
 
-        qimg = image_map.toqimage().scaled(w, h, Qt.IgnoreAspectRatio)
+        displayed_map = image_map
+        raw_range = None
+        if depth_visualization:
+            mode = DepthDisplayMode(self.depthDisplayCombo.currentText())
+            if mode != DepthDisplayMode.RAW:
+                visualization = render_depth_visualization(
+                    image_map,
+                    contours=mode == DepthDisplayMode.COLOR_CONTOURS,
+                )
+                displayed_map = visualization.image
+                raw_range = (visualization.low_raw, visualization.high_raw)
+
+        qimg = displayed_map.toqimage().scaled(w, h, Qt.IgnoreAspectRatio)
         canvas = QtGui.QPixmap(w, h)
         painter = QtGui.QPainter(canvas)
         try:
@@ -630,27 +677,41 @@ class MainWindow(UILoaderMixin, QMainWindow):
             painter.drawLine(QPoint(0, half_h), QPoint(w, half_h))
 
             font = painter.font()
-            font.setPixelSize(max(16, h // 10))
+            font.setPixelSize(max(12, h // 12))
             painter.setFont(font)
+            source_x = image_map.width // 2
+            source_y = image_map.height // 2
             try:
-                value = image_map.getpixel((half_w, half_h))[0]
+                value = image_map.getpixel((source_x, source_y))[0]
             except TypeError:
-                value = image_map.getpixel((half_w, half_h))
+                value = image_map.getpixel((source_x, source_y))
 
-            if value < ok_value_threshold:
+            if depth_visualization and raw_range is not None:
+                painter.fillRect(5, 5, min(w - 10, 245), min(h - 10, 100), QColor(0, 0, 0, 150))
+                painter.setPen(QColor(255, 255, 255, 255))
+            elif value < ok_value_threshold:
                 painter.setPen(QColor(255, 0, 0, 255))
             else:
                 painter.setPen(QColor(0, 255, 0, 255))
-            painter.drawText(QPoint(50, 50), str(label_text))
-            painter.drawText(QPoint(50, 100), str(value))
+            painter.drawText(QPoint(12, 25), str(label_text))
+            painter.drawText(QPoint(12, 48), f"raw: {value}")
+            if raw_range is not None and raw_range[0] is not None:
+                painter.drawText(QPoint(12, 71), f"local range: {raw_range[0]}–{raw_range[1]}")
             if mouse_x is not None and mouse_y is not None:
-                painter.drawText(QPoint(50, 150), str(int(mouse_x)) + " x " + str(int(mouse_y)))
+                painter.drawText(QPoint(12, 94), str(int(mouse_x)) + " x " + str(int(mouse_y)))
         finally:
             painter.end()
         ui_element.setPixmap(canvas)
 
     def paintZoomedDepthmap(self, depthmap, mouse_x=None, mouse_y=None):
-        self._paintZoomedMap("Depth map", depthmap, self.zoomedDepthMapLabel, mouse_x, mouse_y)
+        self._paintZoomedMap(
+            "Depth map",
+            depthmap,
+            self.zoomedDepthMapLabel,
+            mouse_x,
+            mouse_y,
+            depth_visualization=True,
+        )
 
     def paintZoomedImage(self, zoomed):
         w = self.zoomedImageLabel.width()
@@ -782,7 +843,18 @@ class MainWindow(UILoaderMixin, QMainWindow):
         if w < 1 or h < 1:
             return
 
-        qimg = self.hairless_depth_image.toqimage().scaled(w, h, Qt.KeepAspectRatio)
+        displayed_map = self.hairless_depth_image
+        raw_range = None
+        mode = DepthDisplayMode(self.depthDisplayCombo.currentText())
+        if mode != DepthDisplayMode.RAW:
+            visualization = render_depth_visualization(
+                self.hairless_depth_image,
+                contours=mode == DepthDisplayMode.COLOR_CONTOURS,
+            )
+            displayed_map = visualization.image
+            raw_range = (visualization.low_raw, visualization.high_raw)
+
+        qimg = displayed_map.toqimage().scaled(w, h, Qt.KeepAspectRatio)
         canvas = QtGui.QPixmap(w, h)
         canvas.fill(Qt.black)
         painter = QtGui.QPainter(canvas)
@@ -794,8 +866,10 @@ class MainWindow(UILoaderMixin, QMainWindow):
             font = painter.font()
             font.setPixelSize(max(16, h // 10))
             painter.setFont(font)
-            painter.setPen(QColor(0, 255, 0, 255))
+            painter.setPen(QColor(255, 255, 255, 255))
             painter.drawText(QPoint(5, 20), "Depth (hairless)")
+            if raw_range is not None and raw_range[0] is not None:
+                painter.drawText(QPoint(5, 40), f"range: {raw_range[0]}–{raw_range[1]}")
         finally:
             painter.end()
         self.skinMaskLabel.setPixmap(canvas)
@@ -808,6 +882,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
             self.skinMaskLabel,
             mouse_x,
             mouse_y,
+            depth_visualization=True,
         )
 
     def paintZoomedTeethmap(
@@ -899,8 +974,11 @@ class MainWindow(UILoaderMixin, QMainWindow):
             event = args[0]
             mouse_x = event.x()
             mouse_y = event.y()
+            self.last_zoom_x = mouse_x
+            self.last_zoom_y = mouse_y
         else:
-            mouse_x = mouse_y = 0
+            mouse_x = self.last_zoom_x
+            mouse_y = self.last_zoom_y
 
         img_w = const.MAIN_IMAGE_WIDTH
         img_h = const.MAIN_IMAGE_HEIGHT
@@ -959,9 +1037,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 (img_w, img_h),
                 self.hairless_depth_image.size,
             )
-            zoomed = self.hairless_depth_image.crop(
-                (hd_x - 72, hd_y - 48, hd_x + 72, hd_y + 48)
-            ).resize((zoom_w, zoom_h))
+            zoomed = self.hairless_depth_image.crop((hd_x - 72, hd_y - 48, hd_x + 72, hd_y + 48))
             self.paintZoomedHairlessDepth(zoomed, mouse_x=hd_x, mouse_y=hd_y)
         else:
             self.paintHairlessDepthFull()
@@ -997,13 +1073,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
             )
 
         if self.depthmap:
-            zoomed = (
-                self.depthmap.crop((mouse_x - 72, mouse_y - 48, mouse_x + 72, mouse_y + 48))
-                .resize((zoom_w, zoom_h), Image.HAMMING)
-                .filter(ImageFilter.SHARPEN)
-                .filter(ImageFilter.SHARPEN)
-                .filter(ImageFilter.SHARPEN)
-            )
+            zoomed = self.depthmap.crop((mouse_x - 72, mouse_y - 48, mouse_x + 72, mouse_y + 48))
 
             self.paintZoomedDepthmap(
                 zoomed,

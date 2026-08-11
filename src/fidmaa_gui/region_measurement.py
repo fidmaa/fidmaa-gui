@@ -29,6 +29,8 @@ class RegionMask(str, Enum):
 
 @dataclass(frozen=True)
 class Region:
+    """Circular ROI represented by its square bounding box."""
+
     x1: float
     y1: float
     x2: float
@@ -61,6 +63,19 @@ class Region:
     @property
     def height(self) -> float:
         return self.bottom - self.top
+
+    @property
+    def radius(self) -> float:
+        return min(self.width, self.height) / 2.0
+
+    def contains(self, x: float, y: float, tolerance: float = 0.0) -> bool:
+        center_x, center_y = self.center
+        return math.hypot(x - center_x, y - center_y) <= self.radius + tolerance
+
+    def pixel_mask(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        center_x, center_y = self.center
+        radius = self.radius
+        return (x - center_x) ** 2 + (y - center_y) ** 2 <= radius**2
 
     def clipped_bounds(self, display_size: tuple[int, int]) -> tuple[int, int, int, int]:
         width, height = display_size
@@ -192,7 +207,8 @@ class RegionMeasurementEngine:
         count: int,
     ) -> list[CandidatePoint]:
         x_coords, y_coords, raw_depth = self._sample_region(region)
-        valid = np.isfinite(raw_depth) & (raw_depth > 0)
+        valid = region.pixel_mask(x_coords, y_coords)
+        valid &= np.isfinite(raw_depth) & (raw_depth > 0)
         if mask == RegionMask.TEETH:
             valid &= self._sample_teeth_mask(x_coords, y_coords)
 

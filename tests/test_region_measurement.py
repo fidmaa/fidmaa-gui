@@ -37,7 +37,10 @@ def make_engine(depth, *, teethmap=None, surface_length=None):
 
 
 def test_highest_and_lowest_use_physical_camera_distance():
-    depth = np.tile(np.arange(20, 30, dtype=np.uint8), (10, 1))
+    depth = np.tile(
+        np.array([20, 20, 20, 23, 24, 25, 26, 29, 29, 29], dtype=np.uint8),
+        (10, 1),
+    )
     engine = make_engine(depth)
     region = Region(0, 0, 10, 10)
 
@@ -58,6 +61,22 @@ def test_highest_and_lowest_use_physical_camera_distance():
 
     assert {point.point_3d_mm[2] for point in highest} == {200.0}
     assert {point.point_3d_mm[2] for point in lowest} == {290.0}
+
+
+def test_bounding_box_corners_are_excluded_by_circular_mask():
+    depth = np.full((11, 11), 50, dtype=np.uint8)
+    depth[0, 0] = 1
+    engine = make_engine(depth)
+
+    candidates = engine.select_candidates(
+        Region(0, 0, 11, 11),
+        mode=SelectionMode.HIGHEST,
+        mask=RegionMask.NONE,
+        percentile=10,
+        count=5,
+    )
+
+    assert all((point.x, point.y) != (0, 0) for point in candidates)
 
 
 def test_teeth_mask_restricts_candidates_before_ranking():

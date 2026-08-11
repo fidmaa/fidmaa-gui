@@ -1,11 +1,11 @@
 from types import SimpleNamespace
-from unittest.mock import patch
 
 from PIL import Image
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtTest import QTest
 
 from fidmaa_gui.app import MainWindow
+from fidmaa_gui.depth_visualization import DepthDisplayMode
 from fidmaa_gui.QClickableLabel import QClickableLabel
 from fidmaa_gui.region_measurement import Region, SelectionMode
 
@@ -42,11 +42,11 @@ def test_region_drag_creates_a_then_automatically_selects_b(qapp):
     window = MainWindow()
     window._set_region_interaction_mode(1)
 
-    window._begin_region_drag(QPointF(10, 20))
-    window._drag_region(QPointF(60, 80))
-    window._finish_region_drag(QPointF(60, 80))
+    window._begin_region_drag(QPointF(100, 100))
+    window._drag_region(QPointF(130, 100))
+    window._finish_region_drag(QPointF(130, 100))
 
-    assert window.region_a == Region(10, 20, 60, 80)
+    assert window.region_a == Region(70, 70, 130, 130)
     assert window._region_target == "b"
     assert window.regionBButton.isChecked()
     window.close()
@@ -77,40 +77,34 @@ def test_single_key_tool_shortcuts_and_tools_menu(qapp):
     window.close()
 
 
-def test_region_can_be_moved_and_resized_from_corner(qapp):
+def test_circle_can_be_moved_and_resized_from_perimeter(qapp):
     window = MainWindow()
-    window.region_a = Region(10, 20, 60, 80)
+    window.region_a = Region(70, 70, 130, 130)
     window._set_region_interaction_mode(1)
 
-    window._begin_region_drag(QPointF(30, 40))
-    window._drag_region(QPointF(40, 50))
-    window._finish_region_drag(QPointF(40, 50))
-    assert window.region_a == Region(20, 30, 70, 90)
+    window._begin_region_drag(QPointF(100, 100))
+    window._drag_region(QPointF(110, 110))
+    window._finish_region_drag(QPointF(110, 110))
+    assert window.region_a == Region(80, 80, 140, 140)
 
     window._set_region_interaction_mode(1)
-    window._begin_region_drag(QPointF(20, 30))
-    window._drag_region(QPointF(10, 15))
-    window._finish_region_drag(QPointF(10, 15))
-    assert window.region_a.left == 10
-    assert window.region_a.top == 15
-    assert window.region_a.right == 70
-    assert window.region_a.bottom == 90
+    window._begin_region_drag(QPointF(140, 110))
+    window._drag_region(QPointF(160, 110))
+    window._finish_region_drag(QPointF(160, 110))
+    assert window.region_a == Region(60, 60, 160, 160)
     window.close()
 
 
-def test_shift_constrains_new_region_to_square(qapp):
+def test_new_region_is_always_a_circle_drawn_from_center_to_radius(qapp):
     window = MainWindow()
     window._set_region_interaction_mode(1)
 
-    window._begin_region_drag(QPointF(10, 10))
-    with patch(
-        "fidmaa_gui.app.QApplication.keyboardModifiers",
-        return_value=Qt.ShiftModifier,
-    ):
-        window._drag_region(QPointF(30, 70))
-        window._finish_region_drag(QPointF(30, 70))
+    window._begin_region_drag(QPointF(100, 100))
+    window._drag_region(QPointF(130, 140))
+    window._finish_region_drag(QPointF(130, 140))
 
-    assert window.region_a.width == window.region_a.height == 60
+    assert window.region_a == Region(50, 50, 150, 150)
+    assert window.region_a.radius == 50
     window.close()
 
 
@@ -133,5 +127,10 @@ def test_panel_calculates_linear_and_surface_summaries(qapp):
     assert "Linear 3D:" in window.regionResultEdit.toPlainText()
     assert "Surface 3D:" in window.regionResultEdit.toPlainText()
     assert "(n=10" in window.regionResultEdit.toPlainText()
+    assert window.depthDisplayCombo.currentText() == DepthDisplayMode.COLOR.value
+    assert {
+        window.depthDisplayCombo.itemText(index)
+        for index in range(window.depthDisplayCombo.count())
+    } == {mode.value for mode in DepthDisplayMode}
     window.portrait = None
     window.close()
