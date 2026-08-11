@@ -2,22 +2,13 @@ import math
 from types import SimpleNamespace
 
 import pytest
+from portrait_analyser.incisor import pixels_per_mm_at_distance
 
 from fidmaa_gui.app import MainWindow
 
 
-class MeasurementHarness:
-    how_many_pixels_per_mm_at_distance_on_big_image = (
-        MainWindow.how_many_pixels_per_mm_at_distance_on_big_image
-    )
-    how_many_mm_per_pixels_at_distance_on_big_image = (
-        MainWindow.how_many_mm_per_pixels_at_distance_on_big_image
-    )
-
-
 def make_measurement_harness():
-    window = MeasurementHarness()
-    window.image = SimpleNamespace(size=(2320, 3087))
+    window = SimpleNamespace(image=SimpleNamespace(size=(2320, 3087)))
     return window
 
 
@@ -39,9 +30,7 @@ def test_same_depth_distance_keeps_calibrated_pixel_scale():
 
     measured_dx = point_2[0] - point_1[0]
     measured_dy = point_2[1] - point_1[1]
-    pixels_per_mm = MainWindow.how_many_pixels_per_mm_at_distance_on_big_image(
-        window, distance_cm, 1
-    )
+    pixels_per_mm = pixels_per_mm_at_distance(distance_cm)
     expected_dx = ((300 - 180) * window.image.size[0] / 480) / pixels_per_mm
     expected_dy = ((360 - 280) * window.image.size[1] / 640) / pixels_per_mm
 

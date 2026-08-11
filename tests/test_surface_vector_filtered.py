@@ -1,90 +1,65 @@
-import math
+"""Tests for MainWindow.surface_vector_filtered.
+
+The underlying filtered/bilinear sampling primitives (median_filter_depthmap,
+bilinear_sample, sample_points_along_line, measure_filtered_surface_length)
+now live in portrait_analyser.depth_sampling and are covered by that
+library's own test suite. This file only covers fidmaa-gui's glue: mapping
+a display-space (480x640) click to photo-space and delegating to the
+library, with self.filtered_depthmap lazily cached on first use.
+"""
+
 from types import SimpleNamespace
 
 import pytest
 from PIL import Image
 
 from fidmaa_gui.app import MainWindow
-from fidmaa_gui.utils import (
-    bilinear_sample,
-    median_filter_depthmap,
-    sample_points_along_line,
-)
 
 
-class TestSamplePointsAlongLine:
-    def test_uses_approximately_requested_step_and_keeps_endpoint(self):
-        points = list(sample_points_along_line(0, 0, 10, 0, step=3))
-
-        expected = [(0, 0), (10 / 3, 0), (20 / 3, 0), (10, 0)]
-        assert len(points) == len(expected)
-        for point, expected_point in zip(points, expected, strict=True):
-            assert point == pytest.approx(expected_point)
-
-    def test_diagonal_spacing_is_measured_along_line(self):
-        points = list(sample_points_along_line(0, 0, 6, 8, step=5))
-
-        assert points == [(0, 0), (3, 4), (6, 8)]
-
-    def test_reversing_line_returns_same_points_in_reverse(self):
-        forward = list(sample_points_along_line(2, 3, 15, 9, step=4))
-        backward = list(sample_points_along_line(15, 9, 2, 3, step=4))
-
-        assert len(forward) == len(backward)
-        for point, reverse_point in zip(forward, reversed(backward), strict=True):
-            assert point == pytest.approx(reverse_point)
-
-    def test_rejects_non_positive_step(self):
-        with pytest.raises(ValueError):
-            list(sample_points_along_line(0, 0, 10, 0, step=0))
-
-
-class TestFilteredDepthSampling:
-    def test_median_filter_preserves_size_and_removes_impulse(self):
-        depthmap = Image.new("L", (5, 5), 100)
-        depthmap.putpixel((2, 2), 255)
-
-        filtered = median_filter_depthmap(depthmap, size=3)
-
-        assert filtered.size == depthmap.size
-        assert filtered.getpixel((2, 2)) == 100
-
-    def test_median_filter_uses_raw_first_channel(self):
-        depthmap = Image.new("RGB", (3, 3), (100, 10, 200))
-
-        filtered = median_filter_depthmap(depthmap, size=3)
-
-        assert filtered.mode == "L"
-        assert filtered.getpixel((1, 1)) == 100
-
-    def test_bilinear_sample_interpolates_fractional_coordinate(self):
-        image = Image.new("L", (2, 2))
-        image.putdata([0, 10, 20, 30])
-
-        assert bilinear_sample(image, 0.5, 0.5) == pytest.approx(15.0)
-
-    def test_bilinear_sample_rejects_contributing_invalid_depth(self):
-        image = Image.new("L", (2, 2))
-        image.putdata([0, 10, 20, 30])
-
-        assert bilinear_sample(image, 0.5, 0.5, invalid_value=0) is None
+def make_flat_surface_window(photo_width=480, photo_height=640, fill_value=100):
+    depthmap = Image.new("L", (photo_width, photo_height), fill_value)
+    return SimpleNamespace(
+        depthmap=depthmap,
+        filtered_depthmap=None,
+        image=SimpleNamespace(size=(photo_width, photo_height)),
+        float_min_value=0.5,
+        float_max_value=2.0,
+    )
 
 
 def test_surface_vector_filtered_is_stable_on_flat_surface():
-    depthmap = Image.new("L", (480, 640), 100)
-    window = SimpleNamespace(
-        depthmap=depthmap,
-        filtered_depthmap=median_filter_depthmap(depthmap),
-        get_depthmap_distance=lambda value: value / 10.0,
-        translate_click_to_mm=lambda _distance, x, y: (x, y),
-        vector_length_simple=lambda x1, y1, z1, x2, y2, z2: math.sqrt(
-            (x2 - x1) ** 2 + (y2 - y1) ** 2 + (z2 - z1) ** 2
-        ),
-    )
+    """A flat depth map measured at increasing sample density should give a
+    consistent length, not inflate with sensor noise."""
+    window = make_flat_surface_window()
 
     lengths = [
-        MainWindow.surface_vector_filtered(window, 10, 20, 31, 20, step)
+        MainWindow.surface_vector_filtered(window, 10, 20, 41, 20, step)
         for step in range(2, 8)
     ]
 
-    assert lengths == pytest.approx([21.0] * 6)
+    assert all(length is not None for length in lengths)
+    assert lengths == pytest.approx([lengths[0]] * len(lengths), rel=0.05)
+
+
+def test_surface_vector_filtered_caches_filtered_depthmap():
+    window = make_flat_surface_window()
+    assert window.filtered_depthmap is None
+
+    MainWindow.surface_vector_filtered(window, 10, 20, 41, 20, step=5)
+
+    assert window.filtered_depthmap is not None
+    cached = window.filtered_depthmap
+    MainWindow.surface_vector_filtered(window, 10, 20, 41, 20, step=5)
+    assert window.filtered_depthmap is cached
+
+
+def test_surface_vector_filtered_rejects_non_positive_step():
+    window = make_flat_surface_window()
+    with pytest.raises(ValueError):
+        MainWindow.surface_vector_filtered(window, 10, 20, 41, 20, step=0)
+
+
+def test_surface_vector_filtered_none_on_invalid_depth():
+    window = make_flat_surface_window(photo_width=60, photo_height=60, fill_value=0)
+    result = MainWindow.surface_vector_filtered(window, 10, 20, 41, 20, step=5)
+    assert result is None
