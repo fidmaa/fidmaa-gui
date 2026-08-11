@@ -21,7 +21,10 @@ uv run fidmaa_gui ~/path/to/photo.heic
 make all  # runs clean + pyinstaller + copy files
 ```
 
-No test suite exists in this project.
+```bash
+# Run the test suite
+uv run pytest
+```
 
 ## Architecture
 
@@ -39,6 +42,7 @@ No test suite exists in this project.
 
 ## Conventions
 
-- Formatting: black + isort (profile=black)
+- Formatting and linting: ruff (`ruff-check --fix` + `ruff-format`, line length 100),
+  wired up via `.pre-commit-config.yaml`. Run `pre-commit install` once.
 - The application works with fixed display sizes: main image 480x640, zoom views 480x320
 - Depth values are converted from 0-255 pixel range to centimeters using iPhone TrueDepth EXIF calibration data
