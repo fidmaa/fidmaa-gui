@@ -1,4 +1,5 @@
-"""Tests for pure calculation functions that live in app.py.
+"""Tests for pure calculation functions that live in app.py (or, since the
+principal-point fix, delegate from app.py to portrait_analyser).
 
 Since app.py has heavy GUI/library dependencies that may not resolve in test
 environments, we replicate the pure math functions here for testing. These
@@ -9,6 +10,7 @@ tests should be updated to match.
 import math
 
 import pytest
+from portrait_analyser.incisor import pixels_per_mm_at_distance
 
 
 def vector_length_simple(x1, y1, z1, x2, y2, z2):
@@ -33,15 +35,13 @@ def get_depthmap_distance(value, float_min_value=None, float_max_value=None):
 
 
 def how_many_pixels_per_mm_at_distance_on_big_image(distance, mm):
-    """Replica of MainWindow.how_many_pixels_per_mm_at_distance_on_big_image."""
-    return (
-        30.79912
-        - 1.346418 * distance
-        + 0.03009753 * distance**2
-        - 0.0003733656 * distance**3
-        + 0.000002521213 * distance**4
-        - 7.49986e-9 * distance**5
-    )
+    """how_many_pixels_per_mm_at_distance_on_big_image no longer exists on
+    MainWindow -- the calibration polynomial now lives solely in
+    portrait_analyser.incisor.pixels_per_mm_at_distance, tested there. Kept
+    as a thin (distance, mm) -> float shim so the tests below don't need
+    to change.
+    """
+    return pixels_per_mm_at_distance(distance)
 
 
 class TestVectorLengthSimple:

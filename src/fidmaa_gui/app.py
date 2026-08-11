@@ -4,18 +4,27 @@ import sys
 from textwrap import dedent
 
 import numpy as np
-
 from PIL import Image, ImageFile, ImageFilter
+from portrait_analyser.depth_sampling import (
+    measure_filtered_surface_length,
+    median_filter_depthmap,
+    sample_points_along_line,
+)
 from portrait_analyser.exceptions import (
     ExifValidationFailed,
     NoDepthMapFound,
     UnknownExtension,
 )
-from portrait_analyser.tmd import compute_tmd_3d
+from portrait_analyser.incisor import (
+    depth_raw_to_distance_cm,
+    pixel_to_mm,
+    vector_length_3d,
+)
 from portrait_analyser.ios import IOSPortrait, load_image
 from portrait_analyser.mouth import compute_mouth_measurement_from_facemesh
 from portrait_analyser.neck import compute_neck_circumference
 from portrait_analyser.pose import PortraitPose, detect_neck_midpoint
+from portrait_analyser.tmd import compute_tmd_3d
 from PySide6 import QtGui
 from PySide6.QtCore import QObject, QPoint, QSettings, Qt
 from PySide6.QtGui import QColor
@@ -35,11 +44,8 @@ from . import const, errors
 from .calculations import findPoint
 from .utils import (
     UILoaderMixin,
-    bilinear_sample,
     clamp,
     interpolate_pixels_along_line,
-    median_filter_depthmap,
-    sample_points_along_line,
     translate_coordinates_to_other_image,
 )
 
@@ -451,13 +457,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
         if self.float_min_value is None or self.float_max_value is None:
             return value
 
-        return (
-            100
-            * 1.0
-            / (
-                self.float_max_value * value / 255
-                + self.float_min_value * (1 - value / 255)
-            )
+        return depth_raw_to_distance_cm(
+            value, self.float_min_value, self.float_max_value
         )
 
     def redrawZoom(self, *args, **kw):
@@ -1152,8 +1153,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 else "UNKNOWN"
             )
             txt = f"*** {pose_label} ***\n\n"
-            txt += dedent(
-                f"""\
+            txt += dedent(f"""\
             Single click:
               Depth map coords: {mouse_x, mouse_y}
               Depth map value: {closeness}
@@ -1164,8 +1164,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
               Line length (2D): {line_len:.2f} px
               Vector length (3D): {vector_length_3d / 10.0:.2f} cm
               Surface length (3D): {(surface_length_3d / 10.0):.2f} cm
-            """
-            )
+            """)
             txt += "\n  Surface vector filtered (median 3x3):"
             for step, length_mm in filtered_surface_lengths.items():
                 if length_mm is None:
@@ -1173,14 +1172,12 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 else:
                     formatted_length = f"{length_mm / 10.0:.2f} cm"
                 txt += f"\n    N={step} px: {formatted_length}"
-            txt += dedent(
-                f"""
+            txt += dedent(f"""
 
                 Last 5 clicks:
                   Sum vector length (3D): {sum(self.last_5_distances_vect) / 10.0:.2f} cm
                   Sum surface length (3D): {sum(self.last_5_distances_srfc) / 10.0:.2f} cm\
-                """
-            )
+                """)
 
             # Gate measurement display by pose
             pose = self.neck_midpoint.pose if self.neck_midpoint else None
@@ -1287,22 +1284,16 @@ class MainWindow(UILoaderMixin, QMainWindow):
     def translate_click_to_mm(self, distance_cm, x, y):
         """Translate a display-space click to camera-centred X/Y millimetres.
 
-        Pixel coordinates are measured from the top-left corner, while the
-        physical camera coordinate system is centred on the optical axis.  The
-        geometric image centre is used as the principal point.
+        Pixel coordinates are measured from the top-left corner in display
+        (480x640) space; portrait_analyser.pixel_to_mm() converts to physical
+        millimetres centred on the image's principal point.
         """
         image_x = x * self.image.size[0] / const.MAIN_IMAGE_WIDTH
         image_y = y * self.image.size[1] / const.MAIN_IMAGE_HEIGHT
-        principal_x = self.image.size[0] / 2.0
-        principal_y = self.image.size[1] / 2.0
 
         return (
-            self.how_many_mm_per_pixels_at_distance_on_big_image(
-                distance_cm, image_x - principal_x
-            ),
-            self.how_many_mm_per_pixels_at_distance_on_big_image(
-                distance_cm, image_y - principal_y
-            ),
+            pixel_to_mm(image_x, distance_cm, self.image.size[0]),
+            pixel_to_mm(image_y, distance_cm, self.image.size[1]),
         )
 
     def click_to_3d(self, x, y):
@@ -1346,10 +1337,12 @@ class MainWindow(UILoaderMixin, QMainWindow):
     ):
         """Measure a median-filtered surface profile every ``step`` pixels.
 
-        Coordinates between samples are measured in the 480x640 display space.
-        Fractional positions are mapped to the native depth-map resolution and
-        sampled bilinearly.  A zero disparity invalidates the measurement rather
-        than introducing a foreground-to-background depth wall.
+        Coordinates between samples are measured in the 480x640 display space,
+        then mapped to photo-space for portrait_analyser's
+        measure_filtered_surface_length(), which handles the fractional
+        depth-map sampling and mm conversion. A zero disparity invalidates
+        the measurement rather than introducing a foreground-to-background
+        depth wall.
         """
         if step <= 0:
             raise ValueError("step must be greater than zero")
@@ -1357,41 +1350,33 @@ class MainWindow(UILoaderMixin, QMainWindow):
         if self.filtered_depthmap is None:
             self.filtered_depthmap = median_filter_depthmap(self.depthmap, size=3)
 
-        depth_width, depth_height = self.filtered_depthmap.size
-        display_width = const.MAIN_IMAGE_WIDTH
-        display_height = const.MAIN_IMAGE_HEIGHT
-        points_3d = []
-
-        for x, y in sample_points_along_line(
-            mouse_x,
-            mouse_y,
-            last_click_x,
-            last_click_y,
-            step,
-        ):
-            depth_x = x * (depth_width - 1) / (display_width - 1)
-            depth_y = y * (depth_height - 1) / (display_height - 1)
-            raw_depth = bilinear_sample(
-                self.filtered_depthmap,
-                depth_x,
-                depth_y,
-                invalid_value=0,
+        photo_width, photo_height = self.image.size
+        points_photo = [
+            (
+                x * photo_width / const.MAIN_IMAGE_WIDTH,
+                y * photo_height / const.MAIN_IMAGE_HEIGHT,
             )
-            if raw_depth is None:
-                return None
+            for x, y in sample_points_along_line(
+                mouse_x,
+                mouse_y,
+                last_click_x,
+                last_click_y,
+                step,
+            )
+        ]
 
-            z_cm = self.get_depthmap_distance(raw_depth)
-            x_mm, y_mm = self.translate_click_to_mm(z_cm, x, y)
-            points_3d.append((x_mm, y_mm, z_cm * 10))
-
-        return sum(
-            self.vector_length_simple(*point_1, *point_2)
-            for point_1, point_2 in zip(points_3d, points_3d[1:], strict=False)
+        return measure_filtered_surface_length(
+            self.filtered_depthmap,
+            points_photo,
+            photo_width,
+            photo_height,
+            self.float_min_value,
+            self.float_max_value,
         )
 
     def vector_length_simple(self, x1, y1, z1, x2, y2, z2):
         """Simple mathematical lenght of the vector"""
-        return math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2 + (z2 - z1) ** 2)
+        return vector_length_3d(x1, y1, z1, x2, y2, z2)
 
     def vector_length_between_two_clicks(self, x1, y1, x2, y2):
         z1 = self.get_depthmap_value(x1, y1)
@@ -1422,32 +1407,6 @@ class MainWindow(UILoaderMixin, QMainWindow):
     def calculate_line_length(self, dist_x, dist_y):
         line_len = math.sqrt(abs(dist_x * dist_x) + abs(dist_y * dist_y))
         return line_len
-
-    def how_many_pixels_per_mm_at_distance_on_big_image(self, distance, mm):
-        """Return pixel count per mm at a given distance from camera.
-
-        Constants taken from own calibration data and a curve
-        fitted by MyCurveFit.com. I strongly recommend their
-        service, it is very easy to use and affordable.
-
-        :param distance: distance in centimeters from the camera
-        :param mm: millimeters (unused, kept for API compat)
-        """
-        return (
-            30.79912
-            - 1.346418 * distance
-            + 0.03009753 * distance**2
-            - 0.0003733656 * distance**3
-            + 0.000002521213 * distance**4
-            - 7.49986e-9 * distance**5
-        )
-
-    def how_many_mm_per_pixels_at_distance_on_big_image(self, distance, no_pixels):
-        assert distance >= 15.0, "Distance must be bigger than 15 cms"
-        pixels_per_mm = self.how_many_pixels_per_mm_at_distance_on_big_image(
-            distance, 1
-        )
-        return no_pixels / pixels_per_mm
 
     def _loadImage(self, fileName):
         self.filename = fileName
@@ -1561,23 +1520,31 @@ class MainWindow(UILoaderMixin, QMainWindow):
             self.ui.showNeckArcCheckBox.setEnabled(neck_arc_available)
             self.ui.showNeckArcCheckBox.setChecked(neck_arc_available)
             self.ui.showNeckArcCheckBox.setToolTip(
-                "" if neck_arc_available else "Neck arc is only available for neutral neck pose"
+                ""
+                if neck_arc_available
+                else "Neck arc is only available for neutral neck pose"
             )
 
             centroids_available = pose == PortraitPose.OPEN_MOUTH
             self.ui.showCentroidsCheckBox.setEnabled(centroids_available)
             self.ui.showCentroidsCheckBox.setChecked(centroids_available)
             self.ui.showCentroidsCheckBox.setToolTip(
-                "" if centroids_available else "Teeth centroids are only available for open mouth pose"
+                ""
+                if centroids_available
+                else "Teeth centroids are only available for open mouth pose"
             )
         else:
             self.ui.showNeckArcCheckBox.setEnabled(False)
             self.ui.showNeckArcCheckBox.setChecked(False)
-            self.ui.showNeckArcCheckBox.setToolTip("No face/pose detected in this picture")
+            self.ui.showNeckArcCheckBox.setToolTip(
+                "No face/pose detected in this picture"
+            )
 
             self.ui.showCentroidsCheckBox.setEnabled(False)
             self.ui.showCentroidsCheckBox.setChecked(False)
-            self.ui.showCentroidsCheckBox.setToolTip("No face/pose detected in this picture")
+            self.ui.showCentroidsCheckBox.setToolTip(
+                "No face/pose detected in this picture"
+            )
 
         # Enable/disable debug checkboxes based on available data
         has_pose = self.mediapipe_debug is not None
