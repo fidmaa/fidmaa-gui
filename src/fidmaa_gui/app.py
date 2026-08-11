@@ -1285,12 +1285,23 @@ class MainWindow(UILoaderMixin, QMainWindow):
         return self.get_depthmap_distance(self.get_depthmap_value(x, y))
 
     def translate_click_to_mm(self, distance_cm, x, y):
+        """Translate a display-space click to camera-centred X/Y millimetres.
+
+        Pixel coordinates are measured from the top-left corner, while the
+        physical camera coordinate system is centred on the optical axis.  The
+        geometric image centre is used as the principal point.
+        """
+        image_x = x * self.image.size[0] / const.MAIN_IMAGE_WIDTH
+        image_y = y * self.image.size[1] / const.MAIN_IMAGE_HEIGHT
+        principal_x = self.image.size[0] / 2.0
+        principal_y = self.image.size[1] / 2.0
+
         return (
             self.how_many_mm_per_pixels_at_distance_on_big_image(
-                distance_cm, x * self.image.size[0] / const.MAIN_IMAGE_WIDTH
+                distance_cm, image_x - principal_x
             ),
             self.how_many_mm_per_pixels_at_distance_on_big_image(
-                distance_cm, y * self.image.size[1] / const.MAIN_IMAGE_HEIGHT
+                distance_cm, image_y - principal_y
             ),
         )
 
