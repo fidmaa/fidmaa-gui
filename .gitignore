@@ -32,6 +32,8 @@ MANIFEST
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+# ...except this project's hand-maintained one, which CI builds from.
+!fidmaa_gui.spec
 
 # Installer logs
 pip-log.txt
