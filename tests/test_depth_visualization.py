@@ -62,6 +62,26 @@ def test_contours_are_recomputed_as_one_pixel_lines_at_display_resolution():
     assert active_columns[0] in (59, 60)
 
 
+def test_contour_step_draws_only_every_nth_raw_depth_level():
+    row = np.repeat(np.arange(240, 246, dtype=np.uint8), 3)
+    depth = Image.fromarray(np.tile(row, (8, 1)), mode="L")
+
+    every_level = np.asarray(render_depth_contour_overlay(depth, depth.size, level_step=1))
+    every_third = np.asarray(render_depth_contour_overlay(depth, depth.size, level_step=3))
+    every_level_columns = np.flatnonzero(every_level[..., 3].any(axis=0))
+    every_third_columns = np.flatnonzero(every_third[..., 3].any(axis=0))
+
+    assert len(every_level_columns) == 5
+    assert len(every_third_columns) == 1
+
+
+def test_contour_step_must_be_positive():
+    depth = Image.new("L", (5, 5), 128)
+
+    with np.testing.assert_raises_regex(ValueError, "at least 1"):
+        render_depth_contour_overlay(depth, depth.size, level_step=0)
+
+
 def test_all_invalid_depth_produces_black_image_without_range():
     visualization = render_depth_visualization(Image.new("L", (4, 3), 0))
 

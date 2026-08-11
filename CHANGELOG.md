@@ -8,6 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Restored absolute `Highest` and `Lowest` region selectors while retaining
+  pose-resistant `Local peak` and `Local valley` selectors.
+- Added a visible skin-matte-to-stable-depth neck overlay on the main image and
+  zoom views, including raw silhouette edges, corrected depth points, and the
+  measured neck arc.
+- Added a configurable contour step (1–8 raw depth levels), defaulting to every
+  third level, to reduce visual density without changing measurement data.
 - Added the `surface_vector_filtered` measurement alongside the existing direct
   and surface vector measurements.
 - Added surface length results for sampling intervals `N=2` through `N=7` to

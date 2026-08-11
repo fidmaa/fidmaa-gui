@@ -21,8 +21,10 @@ class MeasurementError(ValueError):
 
 
 class SelectionMode(str, Enum):
-    HIGHEST = "Local peak"
-    LOWEST = "Local valley"
+    HIGHEST = "Highest"
+    LOWEST = "Lowest"
+    LOCAL_PEAK = "Local peak"
+    LOCAL_VALLEY = "Local valley"
     FLATTEST = "Flattest"
 
 
@@ -224,13 +226,17 @@ class RegionMeasurementEngine:
         x_mm, y_mm, z_mm = self._to_3d(x_coords, y_coords, z_cm)
         valid &= np.isfinite(x_mm) & np.isfinite(y_mm) & np.isfinite(z_mm)
 
-        if mode in (SelectionMode.HIGHEST, SelectionMode.LOWEST):
+        if mode == SelectionMode.HIGHEST:
+            score = z_cm
+        elif mode == SelectionMode.LOWEST:
+            score = -z_cm
+        elif mode in (SelectionMode.LOCAL_PEAK, SelectionMode.LOCAL_VALLEY):
             center_x, center_y = region.center
             radial_fraction = np.hypot(x_coords - center_x, y_coords - center_y) / max(
                 region.radius, 1.0
             )
             feature = (
-                SurfaceFeature.PEAK if mode == SelectionMode.HIGHEST else SurfaceFeature.VALLEY
+                SurfaceFeature.PEAK if mode == SelectionMode.LOCAL_PEAK else SurfaceFeature.VALLEY
             )
             try:
                 local_scores = score_local_surface_feature(
@@ -265,7 +271,7 @@ class RegionMeasurementEngine:
         )
         ranked_indexes = valid_indexes[order]
         pool_size = max(count, math.ceil(len(ranked_indexes) * percentile / 100.0))
-        if mode in (SelectionMode.HIGHEST, SelectionMode.LOWEST):
+        if mode in (SelectionMode.LOCAL_PEAK, SelectionMode.LOCAL_VALLEY):
             seed_index = ranked_indexes[0]
             seed_x = x_coords.ravel()[seed_index]
             seed_y = y_coords.ravel()[seed_index]

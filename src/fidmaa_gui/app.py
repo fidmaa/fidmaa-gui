@@ -109,6 +109,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.depthmap = None
         self.filtered_depthmap = None
         self.teethmap = None
+        self.neck_measurement_auto = None
 
         self.float_max_value = self.float_min_value = None
 
@@ -145,10 +146,10 @@ class MainWindow(UILoaderMixin, QMainWindow):
         layout.addWidget(self.regionSelectionButton)
 
         self.regionModeACombo, self.regionMaskACombo = self._create_region_options(
-            layout, "Region A", SelectionMode.HIGHEST
+            layout, "Region A", SelectionMode.LOCAL_PEAK
         )
         self.regionModeBCombo, self.regionMaskBCombo = self._create_region_options(
-            layout, "Region B", SelectionMode.LOWEST
+            layout, "Region B", SelectionMode.LOCAL_VALLEY
         )
 
         settings_group = QGroupBox("Sampling")
@@ -184,6 +185,15 @@ class MainWindow(UILoaderMixin, QMainWindow):
             "Display-only enhancement; measurement data is never remapped."
         )
         depth_form.addRow("Mode:", self.depthDisplayCombo)
+        self.depthContourStepSpin = QSpinBox()
+        self.depthContourStepSpin.setRange(1, 8)
+        self.depthContourStepSpin.setValue(3)
+        self.depthContourStepSpin.setSuffix(" levels")
+        self.depthContourStepSpin.setToolTip(
+            "Draw one contour for every N raw depth levels. Measurements are unchanged."
+        )
+        self.depthContourStepSpin.setEnabled(False)
+        depth_form.addRow("Contour step:", self.depthContourStepSpin)
         layout.addWidget(depth_group)
 
         clear_button = QPushButton("Clear regions")
@@ -213,6 +223,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.regionVectorCountSpin.valueChanged.connect(self._region_settings_changed)
         self.regionRadiusSpin.valueChanged.connect(self._region_radius_changed)
         self.depthDisplayCombo.currentIndexChanged.connect(self._depth_display_changed)
+        self.depthContourStepSpin.valueChanged.connect(self._depth_display_changed)
 
     def _create_region_options(self, parent_layout, title, default_mode):
         group = QGroupBox(title)
@@ -222,9 +233,15 @@ class MainWindow(UILoaderMixin, QMainWindow):
             mode_combo.addItem(mode.value, mode)
         mode_tooltips = {
             SelectionMode.HIGHEST: (
-                "Find a local anatomical bump after removing camera-facing tilt."
+                "Select the globally nearest surface points in the entire patch."
             ),
             SelectionMode.LOWEST: (
+                "Select the globally farthest surface points in the entire patch."
+            ),
+            SelectionMode.LOCAL_PEAK: (
+                "Find a local anatomical bump after removing camera-facing tilt."
+            ),
+            SelectionMode.LOCAL_VALLEY: (
                 "Find a local anatomical depression after removing camera-facing tilt."
             ),
             SelectionMode.FLATTEST: (
@@ -263,15 +280,18 @@ class MainWindow(UILoaderMixin, QMainWindow):
 
         tools_menu.addSeparator()
         action_details = (
-            (SelectionMode.HIGHEST, Qt.Key_H, "Local peak region tool"),
-            (SelectionMode.LOWEST, Qt.Key_L, "Local valley region tool"),
+            (SelectionMode.HIGHEST, Qt.Key_H, "Highest region tool"),
+            (SelectionMode.LOWEST, Qt.Key_L, "Lowest region tool"),
             (SelectionMode.FLATTEST, Qt.Key_F, "Flattest region tool"),
+            (SelectionMode.LOCAL_PEAK, None, "Local peak region tool"),
+            (SelectionMode.LOCAL_VALLEY, None, "Local valley region tool"),
         )
         self.regionToolActions = {}
         for mode, key, text in action_details:
             action = tools_menu.addAction(text)
-            action.setShortcut(QtGui.QKeySequence(key))
-            action.setShortcutContext(Qt.WindowShortcut)
+            if key is not None:
+                action.setShortcut(QtGui.QKeySequence(key))
+                action.setShortcutContext(Qt.WindowShortcut)
             action.setStatusTip(f"Use {mode.value.lower()} candidates for the active region")
             action.triggered.connect(partial(self._activate_region_selector, mode))
             self.regionToolActions[mode] = action
@@ -466,6 +486,9 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self._redraw_region_overlay()
 
     def _depth_display_changed(self, *args):
+        self.depthContourStepSpin.setEnabled(
+            self.depthDisplayCombo.currentData() == DepthDisplayMode.COLOR_CONTOURS
+        )
         self.redrawZoom()
 
     def clear_region_measurement(self, *args, repaint=True):
@@ -700,7 +723,14 @@ class MainWindow(UILoaderMixin, QMainWindow):
         )
 
     def _paint_zoom_region_overlay(self, painter, source_size, crop_box, display_rect):
-        if self._region_target is None:
+        show_regions = self._region_target is not None
+        show_neck = (
+            self.ui.showNeckArcCheckBox.isChecked()
+            and self.neck_measurement_auto is not None
+            and self.portrait is not None
+            and self.portrait.skinmap is not None
+        )
+        if not show_regions and not show_neck:
             return
 
         def display_point(point):
@@ -709,48 +739,115 @@ class MainWindow(UILoaderMixin, QMainWindow):
 
         painter.save()
         try:
-            colors = {
-                "a": QColor(0, 190, 255, 230),
-                "b": QColor(255, 0, 170, 230),
-            }
-            result = self.region_measurement_result
-            if result is not None:
-                painter.setPen(QtGui.QPen(QColor(255, 255, 255, 175), 1))
-                painter.setBrush(Qt.NoBrush)
-                for sample in result.samples:
-                    painter.drawLine(
-                        display_point((sample.start.x, sample.start.y)),
-                        display_point((sample.end.x, sample.end.y)),
-                    )
-                for key, candidates in (
-                    ("a", result.candidates_a),
-                    ("b", result.candidates_b),
-                ):
-                    painter.setPen(Qt.NoPen)
-                    painter.setBrush(colors[key])
-                    for candidate in candidates:
-                        painter.drawEllipse(display_point((candidate.x, candidate.y)), 3, 3)
+            if show_regions:
+                colors = {
+                    "a": QColor(0, 190, 255, 230),
+                    "b": QColor(255, 0, 170, 230),
+                }
+                result = self.region_measurement_result
+                if result is not None:
+                    painter.setPen(QtGui.QPen(QColor(255, 255, 255, 175), 1))
+                    painter.setBrush(Qt.NoBrush)
+                    for sample in result.samples:
+                        painter.drawLine(
+                            display_point((sample.start.x, sample.start.y)),
+                            display_point((sample.end.x, sample.end.y)),
+                        )
+                    for key, candidates in (
+                        ("a", result.candidates_a),
+                        ("b", result.candidates_b),
+                    ):
+                        painter.setPen(Qt.NoPen)
+                        painter.setBrush(colors[key])
+                        for candidate in candidates:
+                            painter.drawEllipse(display_point((candidate.x, candidate.y)), 3, 3)
 
-            for key, region in (("a", self.region_a), ("b", self.region_b)):
-                if region is None:
-                    continue
-                top_left = display_point((region.left, region.top))
-                bottom_right = display_point((region.right, region.bottom))
-                color = colors[key]
-                painter.setPen(QtGui.QPen(color, 2))
-                painter.setBrush(QColor(color.red(), color.green(), color.blue(), 28))
-                painter.drawEllipse(
-                    top_left.x(),
-                    top_left.y(),
-                    bottom_right.x() - top_left.x(),
-                    bottom_right.y() - top_left.y(),
-                )
-                painter.setPen(color)
-                painter.setBrush(Qt.NoBrush)
-                painter.drawText(
-                    display_point((region.center[0] + 4, region.center[1] - 4)),
-                    key.upper(),
-                )
+                for key, region in (("a", self.region_a), ("b", self.region_b)):
+                    if region is None:
+                        continue
+                    top_left = display_point((region.left, region.top))
+                    bottom_right = display_point((region.right, region.bottom))
+                    color = colors[key]
+                    painter.setPen(QtGui.QPen(color, 2))
+                    painter.setBrush(QColor(color.red(), color.green(), color.blue(), 28))
+                    painter.drawEllipse(
+                        top_left.x(),
+                        top_left.y(),
+                        bottom_right.x() - top_left.x(),
+                        bottom_right.y() - top_left.y(),
+                    )
+                    painter.setPen(color)
+                    painter.setBrush(Qt.NoBrush)
+                    painter.drawText(
+                        display_point((region.center[0] + 4, region.center[1] - 4)),
+                        key.upper(),
+                    )
+
+            if show_neck:
+                skin_size = self.portrait.skinmap.size
+
+                def neck_display_point(point):
+                    main_point = translate_coordinates_to_other_image(
+                        point,
+                        skin_size,
+                        (const.MAIN_IMAGE_WIDTH, const.MAIN_IMAGE_HEIGHT),
+                    )
+                    return display_point(main_point)
+
+                self._paint_neck_depth_overlay(painter, neck_display_point)
+        finally:
+            painter.restore()
+
+    def _paint_neck_depth_overlay(self, painter, point_mapper, *, labels=False):
+        """Paint skin-matte edges and their corrected stable depth samples."""
+        measurement = self.neck_measurement_auto
+        if measurement is None:
+            return
+
+        raw_points = (
+            (measurement.mask_left_x, measurement.neck_y),
+            (measurement.mask_right_x, measurement.neck_y),
+        )
+        depth_points = (
+            (measurement.left_x, measurement.neck_y),
+            (measurement.right_x, measurement.neck_y),
+        )
+        arc_points = [point_mapper(point) for point in measurement.arc_points_photo]
+        raw_points = [point_mapper(point) if point[0] is not None else None for point in raw_points]
+        depth_points = [point_mapper(point) for point in depth_points]
+
+        painter.save()
+        try:
+            arc_color = QColor(80, 220, 130, 220)
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QtGui.QPen(arc_color, 2))
+            for first, second in zip(arc_points, arc_points[1:]):
+                painter.drawLine(first, second)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(arc_color)
+            for point in arc_points:
+                painter.drawEllipse(point, 3, 3)
+
+            skin_color = QColor(255, 190, 0, 240)
+            depth_color = QColor(0, 230, 255, 240)
+            connector_pen = QtGui.QPen(QColor(255, 255, 255, 210), 2, Qt.DashLine)
+            for raw_point, depth_point in zip(raw_points, depth_points, strict=True):
+                if raw_point is not None:
+                    painter.setPen(connector_pen)
+                    painter.setBrush(Qt.NoBrush)
+                    painter.drawLine(raw_point, depth_point)
+                    painter.setPen(QtGui.QPen(skin_color, 2))
+                    painter.drawEllipse(raw_point, 6, 6)
+                    if labels:
+                        painter.setPen(skin_color)
+                        painter.drawText(raw_point + QPoint(7, -7), "skin")
+                painter.setPen(QtGui.QPen(QColor(0, 70, 80, 255), 1))
+                painter.setBrush(depth_color)
+                painter.drawEllipse(depth_point, 5, 5)
+                if labels:
+                    painter.setPen(depth_color)
+                    painter.setBrush(Qt.NoBrush)
+                    painter.drawText(depth_point + QPoint(7, 14), "depth")
         finally:
             painter.restore()
 
@@ -817,6 +914,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 contour_overlay = render_depth_contour_overlay(
                     image_map,
                     (qimg.width(), qimg.height()),
+                    level_step=self.depthContourStepSpin.value(),
                 )
                 painter.drawImage(offset_x, offset_y, contour_overlay.toqimage())
 
@@ -915,9 +1013,6 @@ class MainWindow(UILoaderMixin, QMainWindow):
         skinmap,
         mouse_x=None,
         mouse_y=None,
-        neck_arc_points=None,
-        crop_origin=None,
-        crop_size=None,
         source_size=None,
         crop_box=None,
     ):
@@ -962,25 +1057,6 @@ class MainWindow(UILoaderMixin, QMainWindow):
             if mouse_x is not None and mouse_y is not None:
                 lines.append(f"px {int(mouse_x)},{int(mouse_y)}")
 
-            if neck_arc_points and crop_origin and crop_size:
-                arc_color = QColor(255, 165, 0, 200)
-                painter.setPen(Qt.NoPen)
-                painter.setBrush(arc_color)
-                display_pts = []
-                for px, py in neck_arc_points:
-                    local_x = px - crop_origin[0]
-                    local_y = py - crop_origin[1]
-                    display_x = offset_x + local_x * qimg.width() / crop_size[0]
-                    display_y = offset_y + local_y * qimg.height() / crop_size[1]
-                    if 0 <= display_x <= w and 0 <= display_y <= h:
-                        pt = QPoint(int(display_x), int(display_y))
-                        display_pts.append(pt)
-                        painter.drawEllipse(pt, 3, 3)
-                painter.setBrush(Qt.NoBrush)
-                pen = QtGui.QPen(arc_color, 2)
-                painter.setPen(pen)
-                for i in range(1, len(display_pts)):
-                    painter.drawLine(display_pts[i - 1], display_pts[i])
             self._paint_compact_zoom_info(painter, w, h, lines, text_color)
         finally:
             painter.end()
@@ -1042,6 +1118,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 contour_overlay = render_depth_contour_overlay(
                     self.hairless_depth_image,
                     (qimg.width(), qimg.height()),
+                    level_step=self.depthContourStepSpin.value(),
                 )
                 painter.drawImage(offset_x, offset_y, contour_overlay.toqimage())
 
@@ -1220,21 +1297,10 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 skinmap_y + crop_h,
             )
             zoomed = self.portrait.skinmap.crop(skin_crop).resize((zoom_w, zoom_h))
-            neck_arc_points = None
-            skin_crop_origin = None
-            skin_crop_size = None
-            if self.ui.showNeckArcCheckBox.isChecked() and self.neck_measurement_auto:
-                neck_arc_points = self.neck_measurement_auto.arc_points_photo
-                skin_crop_origin = (skinmap_x - crop_w, skinmap_y - crop_h)
-                skin_crop_size = (crop_w * 2, crop_h * 2)
-
             self.paintZoomedSkinmap(
                 zoomed,
                 mouse_x=skinmap_x,
                 mouse_y=skinmap_y,
-                neck_arc_points=neck_arc_points,
-                crop_origin=skin_crop_origin,
-                crop_size=skin_crop_size,
                 source_size=self.portrait.skinmap.size,
                 crop_box=skin_crop,
             )
@@ -1421,23 +1487,21 @@ class MainWindow(UILoaderMixin, QMainWindow):
                     painter.setPen(QColor(255, 255, 0, 127))
 
             if self.ui.showNeckArcCheckBox.isChecked() and self.neck_measurement_auto:
-                arc_color = QColor(255, 165, 0, 200)
-                painter.setPen(Qt.NoPen)
-                painter.setBrush(arc_color)
-                arc_display_pts = []
-                for px, py in self.neck_measurement_auto.arc_points_photo:
-                    dx, dy = translate_coordinates_to_other_image(
-                        (px, py),
-                        self.portrait.skinmap.size,
+                skin_size = self.portrait.skinmap.size
+
+                def neck_display_point(point):
+                    x, y = translate_coordinates_to_other_image(
+                        point,
+                        skin_size,
                         (img_w, img_h),
                     )
-                    arc_display_pts.append(QPoint(int(dx), int(dy)))
-                    painter.drawEllipse(QPoint(int(dx), int(dy)), 3, 3)
-                painter.setBrush(Qt.NoBrush)
-                pen = QtGui.QPen(arc_color, 2)
-                painter.setPen(pen)
-                for i in range(1, len(arc_display_pts)):
-                    painter.drawLine(arc_display_pts[i - 1], arc_display_pts[i])
+                    return QPoint(round(x), round(y))
+
+                self._paint_neck_depth_overlay(
+                    painter,
+                    neck_display_point,
+                    labels=True,
+                )
                 painter.setPen(QColor(0, 0, 255, 127))
 
             print(
@@ -1912,6 +1976,11 @@ class MainWindow(UILoaderMixin, QMainWindow):
                     txt += f"\n  Front arc: {nma.front_arc_length_mm:.2f} mm"
                     txt += f"\n  Multiplier: {nma.circumference_multiplier:.1f}"
                     txt += f"\n  Arc points: {len(nma.arc_points_photo):d}"
+                    txt += (
+                        "\n  Skin → stable depth:"
+                        f" L {nma.mask_left_x} → {nma.left_x} px,"
+                        f" R {nma.mask_right_x} → {nma.right_x} px"
+                    )
 
                     # Neck circumference approximation from diameter (left_x → right_x) * pi
                     left_display = translate_coordinates_to_other_image(
@@ -2209,7 +2278,12 @@ class MainWindow(UILoaderMixin, QMainWindow):
             self.ui.showNeckArcCheckBox.setEnabled(neck_arc_available)
             self.ui.showNeckArcCheckBox.setChecked(neck_arc_available)
             self.ui.showNeckArcCheckBox.setToolTip(
-                "" if neck_arc_available else "Neck arc is only available for neutral neck pose"
+                (
+                    "Yellow: skin-matte boundary; cyan: first stable depth sample; "
+                    "green: measured neck arc"
+                )
+                if neck_arc_available
+                else "Neck edge measurement is only available for neutral neck pose"
             )
 
             centroids_available = pose == PortraitPose.OPEN_MOUTH

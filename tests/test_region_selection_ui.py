@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 from PIL import Image
+from PySide6 import QtGui
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtTest import QTest
 
@@ -64,6 +65,11 @@ def test_single_key_tool_shortcuts_and_tools_menu(qapp):
     window.show()
     qapp.processEvents()
 
+    available_modes = {
+        window.regionModeACombo.itemData(index) for index in range(window.regionModeACombo.count())
+    }
+    assert available_modes == set(SelectionMode)
+
     QTest.keyClick(window, Qt.Key_H)
     assert window._region_target == "a"
     assert window.regionModeACombo.currentText() == SelectionMode.HIGHEST.value
@@ -83,6 +89,42 @@ def test_single_key_tool_shortcuts_and_tools_menu(qapp):
     assert window.regionModeBCombo.currentText() == SelectionMode.FLATTEST.value
     assert window.pixelToolAction.shortcut().toString().lower() == "p"
     assert window.regionToolActions[SelectionMode.HIGHEST].shortcut().toString().lower() == "h"
+    assert window.regionToolActions[SelectionMode.LOCAL_PEAK].shortcut().isEmpty()
+    window.close()
+
+
+def test_neck_skin_to_depth_overlay_is_visible_without_region_controls(qapp):
+    window = MainWindow()
+    window.portrait = SimpleNamespace(skinmap=Image.new("L", (480, 640), 255))
+    window.neck_measurement_auto = SimpleNamespace(
+        mask_left_x=100,
+        mask_right_x=380,
+        left_x=120,
+        right_x=360,
+        neck_y=200,
+        arc_points_photo=[(120, 200), (240, 230), (360, 200)],
+    )
+    window.ui.showNeckArcCheckBox.setEnabled(True)
+    window.ui.showNeckArcCheckBox.setChecked(True)
+    window._region_target = None
+
+    canvas = QtGui.QImage(120, 160, QtGui.QImage.Format_RGB32)
+    canvas.fill(Qt.black)
+    painter = QtGui.QPainter(canvas)
+    window._paint_zoom_region_overlay(
+        painter,
+        (480, 640),
+        (0, 0, 480, 640),
+        (0, 0, 120, 160),
+    )
+    painter.end()
+
+    skin_edge = canvas.pixelColor(19, 50)
+    stable_depth = canvas.pixelColor(30, 50)
+    assert skin_edge.red() > 200 and skin_edge.green() > 120
+    assert stable_depth.green() > 180 and stable_depth.blue() > 180
+    assert "skin matte" in window.ui.showNeckArcCheckBox.text().lower()
+    assert "stable depth" in window.ui.showNeckArcCheckBox.text().lower()
     window.close()
 
 
@@ -245,5 +287,11 @@ def test_panel_calculates_linear_and_surface_summaries(qapp):
         window.depthDisplayCombo.itemText(index)
         for index in range(window.depthDisplayCombo.count())
     } == {mode.value for mode in DepthDisplayMode}
+    assert window.depthContourStepSpin.value() == 3
+    assert not window.depthContourStepSpin.isEnabled()
+    window.depthDisplayCombo.setCurrentIndex(
+        window.depthDisplayCombo.findData(DepthDisplayMode.COLOR_CONTOURS)
+    )
+    assert window.depthContourStepSpin.isEnabled()
     window.portrait = None
     window.close()

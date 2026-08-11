@@ -27,6 +27,7 @@ def render_depth_visualization(
     depthmap: Image.Image,
     *,
     contours: bool = False,
+    contour_step: int = 1,
 ) -> DepthVisualization:
     """Stretch valid local depth values over Viridis without changing source data."""
     depth = np.asarray(depthmap.convert("L"), dtype=np.uint8)
@@ -50,7 +51,13 @@ def render_depth_visualization(
     colored[~valid] = 0
 
     if contours:
-        overlay = np.asarray(render_depth_contour_overlay(depthmap, depthmap.size))
+        overlay = np.asarray(
+            render_depth_contour_overlay(
+                depthmap,
+                depthmap.size,
+                level_step=contour_step,
+            )
+        )
         colored[overlay[..., 3] > 0] = (255, 255, 255)
 
     return DepthVisualization(Image.fromarray(colored, mode="RGB"), low, high)
@@ -59,8 +66,12 @@ def render_depth_visualization(
 def render_depth_contour_overlay(
     depthmap: Image.Image,
     display_size: tuple[int, int],
+    *,
+    level_step: int = 1,
 ) -> Image.Image:
-    """Render crisp one-display-pixel raw-level boundaries as an RGBA layer."""
+    """Render crisp, optionally thinned raw-level boundaries as an RGBA layer."""
+    if level_step < 1:
+        raise ValueError("level_step must be at least 1")
     width, height = display_size
     overlay = np.zeros((height, width, 4), dtype=np.uint8)
     depth = np.asarray(depthmap.convert("L"), dtype=np.uint8)
@@ -77,18 +88,24 @@ def render_depth_contour_overlay(
             interpolation=cv2.INTER_NEAREST,
         ).astype(bool)
 
-    contour_pixels = _raw_level_boundaries(filtered, valid)
+    contour_pixels = _raw_level_boundaries(filtered, valid, level_step=level_step)
     overlay[contour_pixels] = (255, 255, 255, 220)
     return Image.fromarray(overlay, mode="RGBA")
 
 
-def _raw_level_boundaries(depth: np.ndarray, valid: np.ndarray) -> np.ndarray:
+def _raw_level_boundaries(
+    depth: np.ndarray,
+    valid: np.ndarray,
+    *,
+    level_step: int = 1,
+) -> np.ndarray:
     """Return one-sided boundaries so every rendered contour stays one pixel wide."""
     boundaries = np.zeros(depth.shape, dtype=bool)
+    contour_level = depth if level_step == 1 else depth // level_step
 
-    horizontal = (depth[:, 1:] != depth[:, :-1]) & valid[:, 1:] & valid[:, :-1]
+    horizontal = (contour_level[:, 1:] != contour_level[:, :-1]) & valid[:, 1:] & valid[:, :-1]
     boundaries[:, 1:] |= horizontal
 
-    vertical = (depth[1:, :] != depth[:-1, :]) & valid[1:, :] & valid[:-1, :]
+    vertical = (contour_level[1:, :] != contour_level[:-1, :]) & valid[1:, :] & valid[:-1, :]
     boundaries[1:, :] |= vertical
     return boundaries

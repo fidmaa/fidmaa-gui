@@ -28,14 +28,16 @@ individual depth pixels:
    either patch to move it. Once both patches exist, dragging outside them
    cannot accidentally replace either region; use **Clear regions** to start
    over.
-3. Choose `Local peak`, `Local valley`, or `Flattest` independently for both
-   regions. Peak and valley remove the patch's dominant 3D tilt before ranking
-   points, so mild patient rotation does not turn one side of the patch into
-   the automatic winner. A teeth mask can be applied when it is available.
+3. Choose `Highest`, `Lowest`, `Local peak`, `Local valley`, or `Flattest`
+   independently for both regions. Highest and lowest use the absolute depth
+   extrema in the patch. Local peak and valley remove the patch's dominant 3D
+   tilt before ranking points, so mild patient rotation does not turn one side
+   of the patch into the automatic winner. A teeth mask can be applied when it
+   is available.
 
-Single-key shortcuts select the active tool without `Alt`: `H` for local peak,
-`L` for local valley, `F` for flattest, and `P` for the original pixel tool.
-The same commands are available from the **Tools** menu.
+Single-key shortcuts select the active tool without `Alt`: `H` for highest,
+`L` for lowest, `F` for flattest, and `P` for the original pixel tool. Local
+peak and valley remain available in both selectors and the **Tools** menu.
 
 Both circles, selected candidate pixels, and measurement vectors are repeated
 in the zoomed photo and map views. Their compact value readouts occupy no more
@@ -47,7 +49,14 @@ deviation for both straight 3D distance and median-filtered surface distance.
 
 The depth display can remain in raw grayscale or use locally stretched Viridis
 colours. An optional contour mode outlines boundaries between median-smoothed
-raw depth levels. Contours are recomputed after zooming and stay one display
-pixel wide instead of scaling up with the source bitmap. These modes affect
-only visualization—the measurement engine continues to use the original depth
-values.
+raw depth levels. **Contour step** controls the density from every raw level to
+every eighth level and defaults to every third level. Contours are recomputed
+after zooming and stay one display pixel wide instead of scaling up with the
+source bitmap. These modes affect only visualization—the measurement engine
+continues to use the original depth values.
+
+For a neutral-neck portrait, **Show neck: skin matte → stable depth** displays
+the automatic neck-edge correction. Yellow rings mark the raw skin-matte
+silhouette, cyan points mark the first stable depth samples found while walking
+inward, and the green curve is the depth arc used for the circumference
+measurement. The same overlay is rendered on the photo and zoomed maps.

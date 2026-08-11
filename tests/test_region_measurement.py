@@ -45,7 +45,7 @@ def test_local_peak_removes_pose_tilt_before_selecting_chin_bump():
 
     candidates = engine.select_candidates(
         Region(0, 0, 41, 41),
-        mode=SelectionMode.HIGHEST,
+        mode=SelectionMode.LOCAL_PEAK,
         mask=RegionMask.NONE,
         percentile=10,
         count=5,
@@ -66,7 +66,7 @@ def test_local_valley_ignores_tilt_and_protruding_bone_below_notch():
 
     candidates = engine.select_candidates(
         Region(0, 0, 41, 41),
-        mode=SelectionMode.LOWEST,
+        mode=SelectionMode.LOCAL_VALLEY,
         mask=RegionMask.NONE,
         percentile=10,
         count=5,
@@ -84,14 +84,14 @@ def test_local_peak_and_valley_return_requested_candidate_count():
 
     peak = engine.select_candidates(
         region,
-        mode=SelectionMode.HIGHEST,
+        mode=SelectionMode.LOCAL_PEAK,
         mask=RegionMask.NONE,
         percentile=10,
         count=5,
     )
     valley = engine.select_candidates(
         region,
-        mode=SelectionMode.LOWEST,
+        mode=SelectionMode.LOCAL_VALLEY,
         mask=RegionMask.NONE,
         percentile=10,
         count=5,
@@ -99,6 +99,32 @@ def test_local_peak_and_valley_return_requested_candidate_count():
 
     assert len(peak) == 5
     assert len(valley) == 5
+
+
+def test_highest_and_lowest_select_absolute_depth_extremes():
+    depth = np.full((21, 21), 50, dtype=np.uint8)
+    depth[:, :8] = 20
+    depth[:, 13:] = 80
+    engine = make_engine(depth)
+    region = Region(0, 0, 21, 21)
+
+    highest = engine.select_candidates(
+        region,
+        mode=SelectionMode.HIGHEST,
+        mask=RegionMask.NONE,
+        percentile=10,
+        count=5,
+    )
+    lowest = engine.select_candidates(
+        region,
+        mode=SelectionMode.LOWEST,
+        mask=RegionMask.NONE,
+        percentile=10,
+        count=5,
+    )
+
+    assert all(point.x < 8 for point in highest)
+    assert all(point.x >= 13 for point in lowest)
 
 
 def test_bounding_box_corners_are_excluded_by_circular_mask():

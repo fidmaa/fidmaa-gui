@@ -168,7 +168,10 @@
      <item>
       <widget class="QCheckBox" name="showNeckArcCheckBox">
        <property name="text">
-        <string>Show neck arc</string>
+        <string>Show neck: skin matte → stable depth</string>
+       </property>
+       <property name="toolTip">
+        <string>Show raw skin-matte edges, corrected stable depth points, and the sampled neck arc</string>
        </property>
        <property name="checked">
         <bool>true</bool>
