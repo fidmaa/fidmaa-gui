@@ -37,49 +37,50 @@ class TestTranslateCoordinates:
 
 
 class TestInterpolatePixelsAlongLine:
+    def test_yields_2d_points(self):
+        # Guards against the 3D signature (x1, y1, z1, x2, y2, z2) creeping
+        # back in: app.py unpacks these as `for x, y in ...`.
+        pixels = list(interpolate_pixels_along_line(0, 0, 4, 0))
+        assert all(len(p) == 2 for p in pixels)
+
     def test_horizontal_line(self):
-        pixels = list(interpolate_pixels_along_line(0, 0, 0, 10, 0, 0))
+        pixels = list(interpolate_pixels_along_line(0, 0, 10, 0))
         assert len(pixels) == 11  # 0 to 10 inclusive
-        assert pixels[0] == (0, 0, 0)
-        assert pixels[-1] == (10, 0, 0)
+        assert pixels[0] == (0, 0)
+        assert pixels[-1] == pytest.approx((10, 0))
 
     def test_vertical_line(self):
-        pixels = list(interpolate_pixels_along_line(0, 0, 0, 0, 10, 0))
+        pixels = list(interpolate_pixels_along_line(0, 0, 0, 10))
         assert len(pixels) == 11
-        assert pixels[0] == (0, 0, 0)
-        assert pixels[-1] == (0, 10, 0)
+        assert pixels[0] == (0, 0)
+        assert pixels[-1] == pytest.approx((0, 10))
 
     def test_diagonal_line(self):
-        pixels = list(interpolate_pixels_along_line(0, 0, 0, 10, 10, 0))
+        pixels = list(interpolate_pixels_along_line(0, 0, 10, 10))
         assert len(pixels) == 11
-        assert pixels[0] == (0, 0, 0)
-        assert pixels[-1] == (10, 10, 0)
-
-    def test_z_axis_line(self):
-        pixels = list(interpolate_pixels_along_line(0, 0, 0, 0, 0, 10))
-        assert len(pixels) == 11
-        assert pixels[0] == (0, 0, 0)
-        assert pixels[-1] == (0, 0, 10)
+        assert pixels[0] == (0, 0)
+        assert pixels[-1] == pytest.approx((10, 10))
 
     def test_single_point(self):
-        pixels = list(interpolate_pixels_along_line(5, 5, 5, 5, 5, 5))
+        pixels = list(interpolate_pixels_along_line(5, 5, 5, 5))
         assert len(pixels) == 0  # no_steps == 0
 
     def test_negative_direction(self):
-        pixels = list(interpolate_pixels_along_line(10, 0, 0, 0, 0, 0))
+        pixels = list(interpolate_pixels_along_line(10, 0, 0, 0))
         assert len(pixels) == 11
-        assert pixels[0] == (10, 0, 0)
+        assert pixels[0] == (10, 0)
+        assert pixels[-1] == pytest.approx((0, 0))
 
-    def test_3d_line(self):
-        pixels = list(interpolate_pixels_along_line(0, 0, 0, 10, 5, 3))
-        # Largest axis is x (10), so 11 steps
+    def test_step_count_follows_longest_axis(self):
+        # dist_x is 10, dist_y is 5 -> 10 steps, so 11 points.
+        pixels = list(interpolate_pixels_along_line(0, 0, 10, 5))
         assert len(pixels) == 11
-        # Check first and last points
-        assert pixels[0] == (0, 0, 0)
-        x, y, z = pixels[-1]
-        assert abs(x - 10) < 1e-9
-        assert abs(y - 5) < 1e-9
-        assert abs(z - 3) < 1e-9
+        assert pixels[0] == (0, 0)
+        assert pixels[-1] == pytest.approx((10, 5))
+
+    def test_intermediate_points_are_evenly_spaced(self):
+        pixels = list(interpolate_pixels_along_line(0, 0, 10, 5))
+        assert pixels[5] == pytest.approx((5, 2.5))
 
 
 class TestClamp:
