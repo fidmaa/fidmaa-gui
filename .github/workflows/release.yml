@@ -1,0 +1,52 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag must match the version in pyproject.toml
+        # PyPI rejects a re-upload of an existing version, and it does so only
+        # after the build has run. Fail in five seconds instead.
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          project=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          if [ "$tag" != "$project" ]; then
+            echo "::error::tag $GITHUB_REF_NAME implies version $tag, pyproject.toml says $project"
+            exit 1
+          fi
+          echo "releasing $project"
+
+  pypi:
+    needs: check-version
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/fidmaa-gui
+    permissions:
+      # Required for PyPI trusted publishing; this is the OIDC token.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@a892a5a61159132606e93a2fa6f4358831b04d26 # v1.14.2
+
+# The macOS .app bundle is NOT built or published here. It weighs ~850 MB,
+# which is not something to store on GitHub for every release. Build it on
+# your own machine with `make all` — the result lands in dist/.

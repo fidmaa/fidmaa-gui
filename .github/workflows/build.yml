@@ -1,4 +1,4 @@
-name: Build
+name: Tests
 
 on:
   push:
@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
+  test:
     # macos-latest tracks GitHub's current default (arm64). A pinned label is
     # more reproducible but rots silently: macos-12 was retired and every run
     # sat in the queue for 24h before being cancelled.
@@ -39,17 +39,6 @@ jobs:
       - name: Run tests
         run: uv run pytest
 
-      - name: Run PyInstaller
-        run: uv run pyinstaller fidmaa_gui.spec
-
-      - name: Copy files
-        run: make macos-copy-files
-
-      - name: Build ZIP
-        run: make zip-app
-
-      - name: Archive production artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: fidmaa_gui.app.zip
-          path: dist/fidmaa_gui.app.zip
+      # The .app bundle is deliberately NOT built here. It weighs ~850 MB,
+      # which is far too much to store on every push. Build it locally with
+      # `make all` when you actually need it.
