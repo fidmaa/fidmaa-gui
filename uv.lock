@@ -250,7 +250,7 @@ requires-dist = [
     { name = "opencv-python", specifier = ">=4.6.0.66,<5" },
     { name = "piexif", specifier = ">=1.1.3,<2" },
     { name = "pillow", specifier = ">=10.2.0,<11" },
-    { name = "portrait-analyser", extras = ["pose"], specifier = ">=0.5.0,<0.6" },
+    { name = "portrait-analyser", extras = ["pose"], git = "https://github.com/fidmaa/portrait-analyser.git?rev=a98fc0f0dd7d1a58bc6e43f9fc99f13709b383c6" },
     { name = "pyheif-iplweb", specifier = ">=0.7.1.dev1176" },
     { name = "pyside6", specifier = ">=6.6.2,<7" },
     { name = "pyvista", specifier = ">=0.45,<0.48" },
@@ -646,7 +646,7 @@ wheels = [
 [[package]]
 name = "portrait-analyser"
 version = "0.5.0"
-source = { registry = "https://pypi.org/simple" }
+source = { git = "https://github.com/fidmaa/portrait-analyser.git?rev=a98fc0f0dd7d1a58bc6e43f9fc99f13709b383c6#a98fc0f0dd7d1a58bc6e43f9fc99f13709b383c6" }
 dependencies = [
     { name = "mediapipe" },
     { name = "numpy" },
@@ -654,10 +654,6 @@ dependencies = [
     { name = "pillow" },
     { name = "pyheif", marker = "sys_platform == 'linux'" },
     { name = "pyheif-iplweb", marker = "sys_platform == 'darwin'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/c6/a3/90df2a28534a5eb2db8bd198670414bf41924ea8b010749d53c7be4dabb8/portrait_analyser-0.5.0.tar.gz", hash = "sha256:696aac10291620bcd34461eff16c7e6f58591e098701f11a5463c396559553f0", size = 3328017, upload-time = "2026-08-11T17:04:45.557Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/02/a5/9be052f6610f58f8815c91987e466d0411a2ddc4383e2a20d5cf4a422e7a/portrait_analyser-0.5.0-py3-none-any.whl", hash = "sha256:300252bb879b315e23afe539ce5e25c081dc09eae05798e8c5dd430b35d0d12a", size = 45029, upload-time = "2026-08-11T17:04:44.15Z" },
 ]
 
 [package.optional-dependencies]

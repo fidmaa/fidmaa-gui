@@ -1,0 +1,113 @@
+"""Display-only depth-map enhancement helpers."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+
+import cv2
+import numpy as np
+from PIL import Image
+
+
+class DepthDisplayMode(str, Enum):
+    RAW = "Raw grayscale"
+    COLOR = "Enhanced color"
+    COLOR_CONTOURS = "Color + contours"
+
+
+@dataclass(frozen=True)
+class DepthVisualization:
+    image: Image.Image
+    low_raw: int | None
+    high_raw: int | None
+
+
+def render_depth_visualization(
+    depthmap: Image.Image,
+    *,
+    contours: bool = False,
+    contour_step: int = 1,
+) -> DepthVisualization:
+    """Stretch valid local depth values over Viridis without changing source data."""
+    depth = np.asarray(depthmap.convert("L"), dtype=np.uint8)
+    valid = depth > 0
+    if not np.any(valid):
+        return DepthVisualization(Image.new("RGB", depthmap.size, "black"), None, None)
+
+    low = int(np.floor(np.percentile(depth[valid], 2)))
+    high = int(np.ceil(np.percentile(depth[valid], 98)))
+    if high <= low:
+        low = max(0, low - 1)
+        high = min(255, high + 1)
+
+    normalized = np.clip(
+        (depth.astype(np.float32) - low) * 255.0 / max(1, high - low),
+        0,
+        255,
+    ).astype(np.uint8)
+    colored_bgr = cv2.applyColorMap(normalized, cv2.COLORMAP_VIRIDIS)
+    colored = cv2.cvtColor(colored_bgr, cv2.COLOR_BGR2RGB)
+    colored[~valid] = 0
+
+    if contours:
+        overlay = np.asarray(
+            render_depth_contour_overlay(
+                depthmap,
+                depthmap.size,
+                level_step=contour_step,
+            )
+        )
+        colored[overlay[..., 3] > 0] = (255, 255, 255)
+
+    return DepthVisualization(Image.fromarray(colored, mode="RGB"), low, high)
+
+
+def render_depth_contour_overlay(
+    depthmap: Image.Image,
+    display_size: tuple[int, int],
+    *,
+    level_step: int = 1,
+) -> Image.Image:
+    """Render crisp, optionally thinned raw-level boundaries as an RGBA layer."""
+    if level_step < 1:
+        raise ValueError("level_step must be at least 1")
+    width, height = display_size
+    overlay = np.zeros((height, width, 4), dtype=np.uint8)
+    depth = np.asarray(depthmap.convert("L"), dtype=np.uint8)
+    if width < 1 or height < 1 or min(depth.shape) < 3:
+        return Image.fromarray(overlay, mode="RGBA")
+
+    valid = depth > 0
+    # Match measurement preprocessing: suppress isolated TrueDepth noise with
+    # a 3x3 median before extracting raw-level boundaries.
+    filtered = cv2.medianBlur(depth, 3)
+    if (width, height) != depthmap.size:
+        filtered = cv2.resize(filtered, (width, height), interpolation=cv2.INTER_NEAREST)
+        valid = cv2.resize(
+            valid.astype(np.uint8),
+            (width, height),
+            interpolation=cv2.INTER_NEAREST,
+        ).astype(bool)
+
+    contour_pixels = _raw_level_boundaries(filtered, valid, level_step=level_step)
+    overlay[contour_pixels] = (255, 255, 255, 220)
+    return Image.fromarray(overlay, mode="RGBA")
+
+
+def _raw_level_boundaries(
+    depth: np.ndarray,
+    valid: np.ndarray,
+    *,
+    level_step: int = 1,
+) -> np.ndarray:
+    """Return one-sided boundaries so every rendered contour stays one pixel wide."""
+    boundaries = np.zeros(depth.shape, dtype=bool)
+    contour_level = depth if level_step == 1 else depth // level_step
+
+    horizontal = (contour_level[:, 1:] != contour_level[:, :-1]) & valid[:, 1:] & valid[:, :-1]
+    boundaries[:, 1:] |= horizontal
+
+    vertical = (contour_level[1:, :] != contour_level[:-1, :]) & valid[1:, :] & valid[:-1, :]
+    boundaries[1:, :] |= vertical
+    return boundaries
