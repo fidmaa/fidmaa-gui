@@ -22,19 +22,20 @@ make all  # runs clean + pyinstaller + copy files
 The **Region measurement** dock provides a robust alternative to selecting two
 individual depth pixels:
 
-1. Enable **Show measurement controls**, press at the intended centre, and
-   drag to set the radius of region A. Repeat once to create region B.
+1. Set the shared **Patch radius**, enable **Show measurement controls**, and
+   click once to place region A. Click once more to place region B.
 2. Existing circles are selected directly under the pointer: drag inside
-   either circle to move it or drag its perimeter to resize it. Once both
-   circles exist, dragging outside them cannot accidentally replace either
-   region; use **Clear regions** to start over.
-3. Choose `Highest` (nearest to the camera), `Lowest` (farthest from the
-   camera), or `Flattest` independently for both regions. A teeth mask can be
-   applied when it is available.
+   either patch to move it. Once both patches exist, dragging outside them
+   cannot accidentally replace either region; use **Clear regions** to start
+   over.
+3. Choose `Local peak`, `Local valley`, or `Flattest` independently for both
+   regions. Peak and valley remove the patch's dominant 3D tilt before ranking
+   points, so mild patient rotation does not turn one side of the patch into
+   the automatic winner. A teeth mask can be applied when it is available.
 
-Single-key shortcuts select the active tool without `Alt`: `H` for highest,
-`L` for lowest, `F` for flattest, and `P` for the original pixel tool. The same
-commands are available from the **Tools** menu.
+Single-key shortcuts select the active tool without `Alt`: `H` for local peak,
+`L` for local valley, `F` for flattest, and `P` for the original pixel tool.
+The same commands are available from the **Tools** menu.
 
 Both circles, selected candidate pixels, and measurement vectors are repeated
 in the zoomed photo and map views. Their compact value readouts occupy no more

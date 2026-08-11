@@ -44,13 +44,13 @@ def test_clickable_label_separates_click_drag_and_pointer_motion(qapp):
     label.close()
 
 
-def test_region_drag_creates_a_and_keeps_circle_under_pointer_active(qapp):
+def test_single_click_places_a_fixed_radius_patch(qapp):
     window = MainWindow()
+    window.regionRadiusSpin.setValue(30)
     window.regionSelectionButton.setChecked(True)
 
     window._begin_region_drag(QPointF(100, 100))
-    window._drag_region(QPointF(130, 100))
-    window._finish_region_drag(QPointF(130, 100))
+    window._finish_region_drag(QPointF(100, 100))
 
     assert window.region_a == Region(70, 70, 130, 130)
     assert window._region_target == "a"
@@ -86,9 +86,11 @@ def test_single_key_tool_shortcuts_and_tools_menu(qapp):
     window.close()
 
 
-def test_circle_can_be_moved_and_resized_from_perimeter(qapp):
+def test_patch_can_be_moved_and_radius_control_resizes_both_patches(qapp):
     window = MainWindow()
+    window.regionRadiusSpin.setValue(30)
     window.region_a = Region(70, 70, 130, 130)
+    window.region_b = Region(170, 170, 230, 230)
     window.regionSelectionButton.setChecked(True)
 
     window._begin_region_drag(QPointF(100, 100))
@@ -96,24 +98,23 @@ def test_circle_can_be_moved_and_resized_from_perimeter(qapp):
     window._finish_region_drag(QPointF(110, 110))
     assert window.region_a == Region(80, 80, 140, 140)
 
-    window._begin_region_drag(QPointF(140, 110))
-    window._drag_region(QPointF(160, 110))
-    window._finish_region_drag(QPointF(160, 110))
+    window.regionRadiusSpin.setValue(50)
     assert window.region_a == Region(60, 60, 160, 160)
+    assert window.region_b == Region(150, 150, 250, 250)
     window.close()
 
 
-def test_circle_hover_uses_move_resize_and_draw_cursors(qapp):
+def test_patch_hover_uses_move_and_place_cursors(qapp):
     window = MainWindow()
     window.region_a = Region(70, 70, 130, 130)
     window.regionSelectionButton.setChecked(True)
 
     expected_cursors = [
         (QPointF(100, 100), Qt.CursorShape.SizeAllCursor),
-        (QPointF(130, 100), Qt.CursorShape.SizeHorCursor),
-        (QPointF(100, 70), Qt.CursorShape.SizeVerCursor),
-        (QPointF(121, 121), Qt.CursorShape.SizeFDiagCursor),
-        (QPointF(79, 121), Qt.CursorShape.SizeBDiagCursor),
+        (QPointF(130, 100), Qt.CursorShape.SizeAllCursor),
+        (QPointF(100, 70), Qt.CursorShape.SizeAllCursor),
+        (QPointF(121, 121), Qt.CursorShape.SizeAllCursor),
+        (QPointF(79, 121), Qt.CursorShape.SizeAllCursor),
         (QPointF(180, 180), Qt.CursorShape.CrossCursor),
     ]
     for point, expected_cursor in expected_cursors:
@@ -130,13 +131,13 @@ def test_circle_hover_uses_move_resize_and_draw_cursors(qapp):
     window.close()
 
 
-def test_new_region_is_always_a_circle_drawn_from_center_to_radius(qapp):
+def test_configured_radius_is_used_without_drawing_the_perimeter(qapp):
     window = MainWindow()
+    window.regionRadiusSpin.setValue(50)
     window.regionSelectionButton.setChecked(True)
 
     window._begin_region_drag(QPointF(100, 100))
-    window._drag_region(QPointF(130, 140))
-    window._finish_region_drag(QPointF(130, 140))
+    window._finish_region_drag(QPointF(100, 100))
 
     assert window.region_a == Region(50, 50, 150, 150)
     assert window.region_a.radius == 50
@@ -145,6 +146,7 @@ def test_new_region_is_always_a_circle_drawn_from_center_to_radius(qapp):
 
 def test_clicking_a_moves_a_even_when_b_was_the_previous_target(qapp):
     window = MainWindow()
+    window.regionRadiusSpin.setValue(30)
     original_b = Region(170, 170, 230, 230)
     window.region_a = Region(70, 70, 130, 130)
     window.region_b = original_b

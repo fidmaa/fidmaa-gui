@@ -36,22 +36,60 @@ def make_engine(depth, *, teethmap=None, surface_length=None):
     )
 
 
-def test_highest_and_lowest_use_physical_camera_distance():
-    depth = np.tile(
-        np.array([20, 20, 20, 23, 24, 25, 26, 29, 29, 29], dtype=np.uint8),
-        (10, 1),
-    )
-    engine = make_engine(depth)
-    region = Region(0, 0, 10, 10)
+def test_local_peak_removes_pose_tilt_before_selecting_chin_bump():
+    y, x = np.indices((41, 41), dtype=np.float64)
+    depth = 110.0 + 0.65 * x + 0.15 * y
+    peak_x, peak_y = 25, 18
+    depth -= 13.0 * np.exp(-((x - peak_x) ** 2 + (y - peak_y) ** 2) / 18.0)
+    engine = make_engine(np.rint(depth))
 
-    highest = engine.select_candidates(
+    candidates = engine.select_candidates(
+        Region(0, 0, 41, 41),
+        mode=SelectionMode.HIGHEST,
+        mask=RegionMask.NONE,
+        percentile=10,
+        count=5,
+    )
+
+    assert np.mean([point.x for point in candidates]) == pytest.approx(peak_x, abs=4)
+    assert np.mean([point.y for point in candidates]) == pytest.approx(peak_y, abs=4)
+    assert min(point.x for point in candidates) > 10
+
+
+def test_local_valley_ignores_tilt_and_protruding_bone_below_notch():
+    y, x = np.indices((41, 41), dtype=np.float64)
+    depth = 110.0 + 0.55 * x + 0.12 * y
+    valley_x, valley_y = 17, 19
+    depth += 12.0 * np.exp(-((x - valley_x) ** 2 + (y - valley_y) ** 2) / 16.0)
+    depth[y > 32] -= 8.0
+    engine = make_engine(np.rint(depth))
+
+    candidates = engine.select_candidates(
+        Region(0, 0, 41, 41),
+        mode=SelectionMode.LOWEST,
+        mask=RegionMask.NONE,
+        percentile=10,
+        count=5,
+    )
+
+    assert np.mean([point.x for point in candidates]) == pytest.approx(valley_x, abs=4)
+    assert np.mean([point.y for point in candidates]) == pytest.approx(valley_y, abs=4)
+    assert max(point.y for point in candidates) < 32
+
+
+def test_local_peak_and_valley_return_requested_candidate_count():
+    depth = np.full((20, 20), 50, dtype=np.uint8)
+    engine = make_engine(depth)
+    region = Region(0, 0, 20, 20)
+
+    peak = engine.select_candidates(
         region,
         mode=SelectionMode.HIGHEST,
         mask=RegionMask.NONE,
         percentile=10,
         count=5,
     )
-    lowest = engine.select_candidates(
+    valley = engine.select_candidates(
         region,
         mode=SelectionMode.LOWEST,
         mask=RegionMask.NONE,
@@ -59,8 +97,8 @@ def test_highest_and_lowest_use_physical_camera_distance():
         count=5,
     )
 
-    assert {point.point_3d_mm[2] for point in highest} == {200.0}
-    assert {point.point_3d_mm[2] for point in lowest} == {290.0}
+    assert len(peak) == 5
+    assert len(valley) == 5
 
 
 def test_bounding_box_corners_are_excluded_by_circular_mask():

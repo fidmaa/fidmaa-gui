@@ -40,6 +40,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/fidmaa_gui"]
 
+[tool.uv.sources]
+portrait-analyser = { path = "../portrait-analyser-local-landmark-selection", editable = true }
+
 [tool.ruff]
 line-length = 100
 

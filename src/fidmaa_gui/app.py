@@ -95,7 +95,6 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self._region_drag_action = None
         self._region_drag_start = None
         self._region_drag_original = None
-        self._region_drag_anchor = None
         self.last_zoom_x = 0
         self.last_zoom_y = 0
         self.load_ui()
@@ -141,7 +140,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.regionSelectionButton = QPushButton("Show measurement controls")
         self.regionSelectionButton.setCheckable(True)
         self.regionSelectionButton.setToolTip(
-            "Draw missing circles, or drag either existing circle to move or resize it."
+            "Click to place each fixed-radius patch, or drag an existing patch to move it."
         )
         layout.addWidget(self.regionSelectionButton)
 
@@ -154,6 +153,14 @@ class MainWindow(UILoaderMixin, QMainWindow):
 
         settings_group = QGroupBox("Sampling")
         settings_form = QFormLayout(settings_group)
+        self.regionRadiusSpin = QSpinBox()
+        self.regionRadiusSpin.setRange(10, 120)
+        self.regionRadiusSpin.setValue(40)
+        self.regionRadiusSpin.setSuffix(" px")
+        self.regionRadiusSpin.setToolTip(
+            "Shared radius of both click-to-place measurement patches."
+        )
+        settings_form.addRow("Patch radius:", self.regionRadiusSpin)
         self.regionPercentileSpin = QSpinBox()
         self.regionPercentileSpin.setRange(5, 20)
         self.regionPercentileSpin.setValue(10)
@@ -187,7 +194,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.regionResultEdit.setReadOnly(True)
         self.regionResultEdit.setMinimumWidth(270)
         self.regionResultEdit.setPlainText(
-            "Enable measurement controls, then draw region A and region B."
+            "Enable measurement controls, then click once to place A and once to place B."
         )
         layout.addWidget(self.regionResultEdit, stretch=1)
 
@@ -204,6 +211,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
             widget.currentIndexChanged.connect(self._region_settings_changed)
         self.regionPercentileSpin.valueChanged.connect(self._region_settings_changed)
         self.regionVectorCountSpin.valueChanged.connect(self._region_settings_changed)
+        self.regionRadiusSpin.valueChanged.connect(self._region_radius_changed)
         self.depthDisplayCombo.currentIndexChanged.connect(self._depth_display_changed)
 
     def _create_region_options(self, parent_layout, title, default_mode):
@@ -213,8 +221,12 @@ class MainWindow(UILoaderMixin, QMainWindow):
         for mode in SelectionMode:
             mode_combo.addItem(mode.value, mode)
         mode_tooltips = {
-            SelectionMode.HIGHEST: "Select the candidate pool nearest to the camera.",
-            SelectionMode.LOWEST: "Select the candidate pool farthest from the camera.",
+            SelectionMode.HIGHEST: (
+                "Find a local anatomical bump after removing camera-facing tilt."
+            ),
+            SelectionMode.LOWEST: (
+                "Find a local anatomical depression after removing camera-facing tilt."
+            ),
             SelectionMode.FLATTEST: (
                 "Reject extreme depths, then select the smallest local 3D plane error."
             ),
@@ -251,8 +263,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
 
         tools_menu.addSeparator()
         action_details = (
-            (SelectionMode.HIGHEST, Qt.Key_H, "Highest region tool"),
-            (SelectionMode.LOWEST, Qt.Key_L, "Lowest region tool"),
+            (SelectionMode.HIGHEST, Qt.Key_H, "Local peak region tool"),
+            (SelectionMode.LOWEST, Qt.Key_L, "Local valley region tool"),
             (SelectionMode.FLATTEST, Qt.Key_F, "Flattest region tool"),
         )
         self.regionToolActions = {}
@@ -320,44 +332,24 @@ class MainWindow(UILoaderMixin, QMainWindow):
         elif self._region_target == "b":
             self.region_b = region
 
-    @staticmethod
-    def _find_region_resize_center(region, x, y, tolerance=8):
-        center_x, center_y = region.center
-        distance = math.hypot(x - center_x, y - center_y)
-        if abs(distance - region.radius) <= tolerance:
-            return region.center
-        return None
-
     def _find_region_at_point(self, x, y):
-        boundary_hits = []
         inside_hits = []
         for key, region in (("a", self.region_a), ("b", self.region_b)):
             if region is None:
                 continue
             center_x, center_y = region.center
             distance = math.hypot(x - center_x, y - center_y)
-            boundary_distance = abs(distance - region.radius)
-            if boundary_distance <= 8:
-                boundary_hits.append((boundary_distance, key, region, "resize"))
-            elif region.contains(x, y):
+            if region.contains(x, y, tolerance=4):
                 inside_hits.append((distance, key, region, "move"))
 
-        if boundary_hits:
-            return min(boundary_hits, key=lambda hit: (hit[0], hit[1]))[1:]
         if inside_hits:
             return min(inside_hits, key=lambda hit: (hit[0], hit[1]))[1:]
         return None
 
-    @staticmethod
-    def _circle_region(center_x, center_y, edge_x, edge_y):
-        radius = math.hypot(edge_x - center_x, edge_y - center_y)
-        radius = min(
-            radius,
-            center_x,
-            const.MAIN_IMAGE_WIDTH - center_x,
-            center_y,
-            const.MAIN_IMAGE_HEIGHT - center_y,
-        )
+    def _fixed_radius_region(self, center_x, center_y):
+        radius = float(self.regionRadiusSpin.value())
+        center_x = float(clamp(center_x, radius, const.MAIN_IMAGE_WIDTH - radius))
+        center_y = float(clamp(center_y, radius, const.MAIN_IMAGE_HEIGHT - radius))
         return Region(
             center_x - radius,
             center_y - radius,
@@ -365,43 +357,29 @@ class MainWindow(UILoaderMixin, QMainWindow):
             center_y + radius,
         )
 
-    @staticmethod
-    def _resize_cursor_for_point(region, x, y):
-        center_x, center_y = region.center
-        delta_x = x - center_x
-        delta_y = y - center_y
-        absolute_x = abs(delta_x)
-        absolute_y = abs(delta_y)
-        if absolute_x >= absolute_y * 2:
-            return Qt.CursorShape.SizeHorCursor
-        if absolute_y >= absolute_x * 2:
-            return Qt.CursorShape.SizeVerCursor
-        if delta_x * delta_y >= 0:
-            return Qt.CursorShape.SizeFDiagCursor
-        return Qt.CursorShape.SizeBDiagCursor
+    def _region_radius_changed(self, *args):
+        if self.region_a is not None:
+            self.region_a = self._fixed_radius_region(*self.region_a.center)
+        if self.region_b is not None:
+            self.region_b = self._fixed_radius_region(*self.region_b.center)
+        self._region_settings_changed()
 
     def _update_region_cursor(self, point):
         if self._region_target is None:
             self.ui.imageLabel.setCursor(Qt.CursorShape.CrossCursor)
             return
 
-        region = self._active_region()
         if self._region_drag_action == "move":
             cursor = Qt.CursorShape.SizeAllCursor
-        elif self._region_drag_action == "resize" and region is not None:
-            cursor = self._resize_cursor_for_point(region, point.x(), point.y())
-        elif self._region_drag_action == "draw":
+        elif self._region_drag_action == "place":
             cursor = Qt.CursorShape.CrossCursor
         else:
             hit = self._find_region_at_point(point.x(), point.y())
             if hit is not None:
-                key, region, action = hit
+                key, _region, _action = hit
                 self._region_target = key
                 self._last_region_target = key
-                if action == "resize":
-                    cursor = self._resize_cursor_for_point(region, point.x(), point.y())
-                else:
-                    cursor = Qt.CursorShape.SizeAllCursor
+                cursor = Qt.CursorShape.SizeAllCursor
             elif self._next_missing_region() is not None:
                 cursor = Qt.CursorShape.CrossCursor
             else:
@@ -427,21 +405,16 @@ class MainWindow(UILoaderMixin, QMainWindow):
             self._region_target = target
             self._last_region_target = target
             region = None
-            action = "draw"
+            action = "place"
 
         self._region_drag_start = (x, y)
         self._region_drag_original = region
-        self._region_drag_anchor = None
 
-        if action == "resize":
-            center = self._find_region_resize_center(region, x, y)
-            self._region_drag_action = "resize"
-            self._region_drag_anchor = center
-        elif action == "move":
+        if action == "move":
             self._region_drag_action = "move"
         else:
-            self._region_drag_action = "draw"
-            self._set_active_region(Region(x, y, x, y))
+            self._region_drag_action = "place"
+            self._set_active_region(self._fixed_radius_region(x, y))
         self._update_region_cursor(point)
 
     def _drag_region(self, point):
@@ -455,26 +428,12 @@ class MainWindow(UILoaderMixin, QMainWindow):
             start_x, start_y = self._region_drag_start
             dx = x - start_x
             dy = y - start_y
-            center_x = min(
-                max(original.radius, original.center[0] + dx),
-                const.MAIN_IMAGE_WIDTH - original.radius,
+            region = self._fixed_radius_region(
+                original.center[0] + dx,
+                original.center[1] + dy,
             )
-            center_y = min(
-                max(original.radius, original.center[1] + dy),
-                const.MAIN_IMAGE_HEIGHT - original.radius,
-            )
-            region = Region(
-                center_x - original.radius,
-                center_y - original.radius,
-                center_x + original.radius,
-                center_y + original.radius,
-            )
-        elif self._region_drag_action == "resize":
-            center_x, center_y = self._region_drag_anchor
-            region = self._circle_region(center_x, center_y, x, y)
         else:
-            center_x, center_y = self._region_drag_start
-            region = self._circle_region(center_x, center_y, x, y)
+            region = self._fixed_radius_region(x, y)
 
         self._set_active_region(region)
         self.region_measurement_result = None
@@ -492,7 +451,6 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self._region_drag_action = None
         self._region_drag_start = None
         self._region_drag_original = None
-        self._region_drag_anchor = None
 
         if completed_target == "a" and self.region_a is not None and self.region_b is None:
             self._region_target = "b"
@@ -523,7 +481,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self._region_drag_action = None
         if hasattr(self, "regionResultEdit"):
             self.regionResultEdit.setPlainText(
-                "Draw region A, then region B to calculate a measurement."
+                "Click once to place region A, then once to place region B."
             )
         if repaint:
             self._redraw_region_overlay()
@@ -533,7 +491,9 @@ class MainWindow(UILoaderMixin, QMainWindow):
             return
         if self.region_a is None or self.region_b is None:
             missing = "A" if self.region_a is None else "B"
-            self.regionResultEdit.setPlainText(f"Draw region {missing} to calculate a measurement.")
+            self.regionResultEdit.setPlainText(
+                f"Click once to place region {missing} and calculate a measurement."
+            )
             return
         if self.filtered_depthmap is None or not hasattr(self, "image"):
             self.regionResultEdit.setPlainText("Load an image with depth data first.")
@@ -653,12 +613,6 @@ class MainWindow(UILoaderMixin, QMainWindow):
                     max(1, int(region.width)),
                     max(1, int(region.height)),
                 )
-                if self._region_target is not None:
-                    painter.setPen(Qt.NoPen)
-                    painter.setBrush(color)
-                    handle_x = region.right
-                    handle_y = region.center[1]
-                    painter.drawEllipse(QPoint(int(handle_x), int(handle_y)), 5, 5)
                 painter.setPen(color)
                 painter.setBrush(Qt.NoBrush)
                 painter.drawText(
@@ -790,13 +744,6 @@ class MainWindow(UILoaderMixin, QMainWindow):
                     top_left.y(),
                     bottom_right.x() - top_left.x(),
                     bottom_right.y() - top_left.y(),
-                )
-                painter.setPen(Qt.NoPen)
-                painter.setBrush(color)
-                painter.drawEllipse(
-                    display_point((region.right, region.center[1])),
-                    4,
-                    4,
                 )
                 painter.setPen(color)
                 painter.setBrush(Qt.NoBrush)
