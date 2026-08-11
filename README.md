@@ -52,11 +52,17 @@ colours. An optional contour mode outlines boundaries between median-smoothed
 raw depth levels. **Contour step** controls the density from every raw level to
 every eighth level and defaults to every third level. Contours are recomputed
 after zooming and stay one display pixel wide instead of scaling up with the
-source bitmap. These modes affect only visualization—the measurement engine
-continues to use the original depth values.
+source bitmap. **Cursor depth bands** colors only exact raw values within a
+configurable ±1–8 range of the value under the pointer; the exact cursor level
+is white and the remaining image is dimmed. These modes affect only
+visualization—the measurement engine continues to use the original depth
+values.
 
 For a neutral-neck portrait, **Show neck: skin matte → stable depth** displays
 the automatic neck-edge correction. Yellow rings mark the raw skin-matte
 silhouette, cyan points mark the first stable depth samples found while walking
 inward, and the green curve is the depth arc used for the circumference
 measurement. The same overlay is rendered on the photo and zoomed maps.
+The neck output labels the sampled green curve as a 3D surface polyline and
+reports its direct Euclidean endpoint chord separately. It also includes a
+median-filtered straight-row surface vector at several sampling intervals.

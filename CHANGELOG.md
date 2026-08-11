@@ -15,6 +15,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   measured neck arc.
 - Added a configurable contour step (1–8 raw depth levels), defaulting to every
   third level, to reduce visual density without changing measurement data.
+- Added a cursor-relative depth-band display that assigns distinct colors to
+  exact values within a configurable ±1–8 range and dims everything else.
+- Neck output now distinguishes the curved 3D surface polyline from its direct
+  Euclidean chord and reports median-filtered straight-row surface vectors.
 - Added the `surface_vector_filtered` measurement alongside the existing direct
   and surface vector measurements.
 - Added surface length results for sampling intervals `N=2` through `N=7` to
@@ -26,6 +30,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Pass the semantic hair matte into neck-edge selection and increase automatic
+  front-arc sampling from 10 to 25 points.
+- Position teeth-centroid markers inside the aspect-fitted teeth-map rectangle,
+  including its letterbox offsets, instead of treating the entire widget as
+  image content.
 - Changed pixel-to-millimetre conversion to measure X/Y coordinates from the
   image centre (the principal-point approximation) instead of the top-left
   corner.

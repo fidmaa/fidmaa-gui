@@ -128,6 +128,30 @@ def test_neck_skin_to_depth_overlay_is_visible_without_region_controls(qapp):
     window.close()
 
 
+def test_zoomed_teeth_centroids_follow_keep_aspect_ratio_offsets(qapp):
+    window = MainWindow()
+    window.zoomedTeethMapLabel.setFixedSize(200, 100)
+    centroids = SimpleNamespace(
+        upper_centroid=(25, 50),
+        lower_centroid=None,
+    )
+
+    window.paintZoomedTeethmap(
+        Image.new("L", (100, 100), 255),
+        centroids=centroids,
+        source_size=(100, 100),
+        crop_box=(0, 0, 100, 100),
+    )
+
+    rendered = window.zoomedTeethMapLabel.pixmap().toImage()
+    correctly_offset = rendered.pixelColor(75, 50)
+    old_unoffset_position = rendered.pixelColor(50, 50)
+    assert correctly_offset.red() < 100
+    assert correctly_offset.green() > 180 and correctly_offset.blue() > 180
+    assert old_unoffset_position.red() > 200
+    window.close()
+
+
 def test_patch_can_be_moved_and_radius_control_resizes_both_patches(qapp):
     window = MainWindow()
     window.regionRadiusSpin.setValue(30)
@@ -289,9 +313,17 @@ def test_panel_calculates_linear_and_surface_summaries(qapp):
     } == {mode.value for mode in DepthDisplayMode}
     assert window.depthContourStepSpin.value() == 3
     assert not window.depthContourStepSpin.isEnabled()
+    assert window.depthFocusRadiusSpin.value() == 2
+    assert not window.depthFocusRadiusSpin.isEnabled()
     window.depthDisplayCombo.setCurrentIndex(
         window.depthDisplayCombo.findData(DepthDisplayMode.COLOR_CONTOURS)
     )
     assert window.depthContourStepSpin.isEnabled()
+    assert not window.depthFocusRadiusSpin.isEnabled()
+    window.depthDisplayCombo.setCurrentIndex(
+        window.depthDisplayCombo.findData(DepthDisplayMode.CURSOR_BANDS)
+    )
+    assert not window.depthContourStepSpin.isEnabled()
+    assert window.depthFocusRadiusSpin.isEnabled()
     window.portrait = None
     window.close()
