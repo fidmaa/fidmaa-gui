@@ -333,6 +333,44 @@ class MainWindow(UILoaderMixin, QMainWindow):
             center_y + radius,
         )
 
+    @staticmethod
+    def _resize_cursor_for_point(region, x, y):
+        center_x, center_y = region.center
+        delta_x = x - center_x
+        delta_y = y - center_y
+        absolute_x = abs(delta_x)
+        absolute_y = abs(delta_y)
+        if absolute_x >= absolute_y * 2:
+            return Qt.CursorShape.SizeHorCursor
+        if absolute_y >= absolute_x * 2:
+            return Qt.CursorShape.SizeVerCursor
+        if delta_x * delta_y >= 0:
+            return Qt.CursorShape.SizeFDiagCursor
+        return Qt.CursorShape.SizeBDiagCursor
+
+    def _update_region_cursor(self, point):
+        if self._region_target is None:
+            self.ui.imageLabel.setCursor(Qt.CursorShape.CrossCursor)
+            return
+
+        region = self._active_region()
+        if self._region_drag_action == "move":
+            cursor = Qt.CursorShape.SizeAllCursor
+        elif self._region_drag_action == "resize" and region is not None:
+            cursor = self._resize_cursor_for_point(region, point.x(), point.y())
+        elif self._region_drag_action == "draw":
+            cursor = Qt.CursorShape.CrossCursor
+        elif (
+            region is not None
+            and self._find_region_resize_center(region, point.x(), point.y()) is not None
+        ):
+            cursor = self._resize_cursor_for_point(region, point.x(), point.y())
+        elif region is not None and region.contains(point.x(), point.y()):
+            cursor = Qt.CursorShape.SizeAllCursor
+        else:
+            cursor = Qt.CursorShape.CrossCursor
+        self.ui.imageLabel.setCursor(cursor)
+
     def _begin_region_drag(self, point):
         if self._region_target is None:
             return
@@ -348,12 +386,15 @@ class MainWindow(UILoaderMixin, QMainWindow):
             if center is not None:
                 self._region_drag_action = "resize"
                 self._region_drag_anchor = center
+                self._update_region_cursor(point)
                 return
             if self._region_contains(region, x, y):
                 self._region_drag_action = "move"
+                self._update_region_cursor(point)
                 return
         self._region_drag_action = "draw"
         self._set_active_region(Region(x, y, x, y))
+        self._update_region_cursor(point)
 
     def _drag_region(self, point):
         if self._region_drag_action is None or self._region_target is None:
@@ -411,6 +452,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
 
         self._calculate_region_measurement()
         self._redraw_region_overlay()
+        self._update_region_cursor(point)
 
     def _region_settings_changed(self, *args):
         self.region_measurement_result = None
@@ -2267,6 +2309,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.ui.imageLabel.clicked.connect(self.setMidlinePoint)
         self.ui.imageLabel.setMouseTracking(True)
         self.ui.imageLabel.pointerMoved.connect(self.redrawZoom)
+        self.ui.imageLabel.pointerMoved.connect(self._update_region_cursor)
         self.ui.imageLabel.pressed.connect(self._begin_region_drag)
         self.ui.imageLabel.dragged.connect(self._drag_region)
         self.ui.imageLabel.released.connect(self._finish_region_drag)

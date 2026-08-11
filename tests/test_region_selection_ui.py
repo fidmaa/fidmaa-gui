@@ -95,6 +95,33 @@ def test_circle_can_be_moved_and_resized_from_perimeter(qapp):
     window.close()
 
 
+def test_circle_hover_uses_move_resize_and_draw_cursors(qapp):
+    window = MainWindow()
+    window.region_a = Region(70, 70, 130, 130)
+    window._set_region_interaction_mode(1)
+
+    expected_cursors = [
+        (QPointF(100, 100), Qt.CursorShape.SizeAllCursor),
+        (QPointF(130, 100), Qt.CursorShape.SizeHorCursor),
+        (QPointF(100, 70), Qt.CursorShape.SizeVerCursor),
+        (QPointF(121, 121), Qt.CursorShape.SizeFDiagCursor),
+        (QPointF(79, 121), Qt.CursorShape.SizeBDiagCursor),
+        (QPointF(180, 180), Qt.CursorShape.CrossCursor),
+    ]
+    for point, expected_cursor in expected_cursors:
+        window._update_region_cursor(point)
+        assert window.ui.imageLabel.cursor().shape() == expected_cursor
+
+    window._begin_region_drag(QPointF(180, 180))
+    assert window.ui.imageLabel.cursor().shape() == Qt.CursorShape.CrossCursor
+    window._finish_region_drag(QPointF(180, 180))
+
+    window._set_region_interaction_mode(0)
+    window._update_region_cursor(QPointF(100, 100))
+    assert window.ui.imageLabel.cursor().shape() == Qt.CursorShape.CrossCursor
+    window.close()
+
+
 def test_new_region_is_always_a_circle_drawn_from_center_to_radius(qapp):
     window = MainWindow()
     window._set_region_interaction_mode(1)
