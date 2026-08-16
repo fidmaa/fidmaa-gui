@@ -160,3 +160,6 @@ desktop.ini
 .fuse_hidden*
 .directory
 .Trash-*
+
+# ULBT probe renders — contain identifiable patient faces, never commit
+ulbt_out/
