@@ -29,6 +29,11 @@ CAMERA = CameraModel(fx=2766.1, fy=2766.1, cx=1499.1, cy=2019.6)
 REPAIRED = "metres stored under a disparity label (iOS 26)"
 REPAIRED_TEXT = "Depth repaired: iOS 26 stored metres under a disparity label"
 
+# The library smooths float depth for integration in float32 (OpenCV
+# bilateral), so smoothed values agree with exact float64 maths only to
+# float32 precision (~1e-7 relative, a few 1e-6 after conversions).
+FLOAT32_REL = 1e-5
+
 # Not representable by an 8-bit disparity code: the float path must keep them.
 NEAR_M = 0.35123
 FAR_M = 0.36871
@@ -58,6 +63,9 @@ def _point_mm(display_x, display_y, z_m):
 
 def _float_window(depth_m=None, **portrait_attrs):
     depth = FloatDepthMap(_float_depth_m() if depth_m is None else depth_m, PHOTO_SIZE)
+    # load_image sets the subject distance (skin-matte median) that scales the
+    # library's integration smoothing; here the face is the NEAR_M plane.
+    depth.subject_depth_m = NEAR_M
     display, float_min, float_max = depth.display_encoding()
     window = MainWindow()
     window.image = Image.new("RGB", PHOTO_SIZE)
@@ -143,7 +151,10 @@ def test_surface_on_flat_float_depth_matches_the_straight_line(qapp):
     assert window.linear_length_between_two_clicks_or_none(60, 100, 60, 600) == pytest.approx(
         expected, rel=1e-12
     )
-    assert window.surface_vector_filtered(60, 100, 60, 600, 3) == pytest.approx(expected, rel=1e-9)
+    # A flat plane stays flat under any smoothing: exact up to float32.
+    assert window.surface_vector_filtered(60, 100, 60, 600, 3) == pytest.approx(
+        expected, rel=FLOAT32_REL
+    )
     window.close()
 
 
@@ -216,7 +227,9 @@ def test_zoom_readout_keeps_raw_codes_for_legacy(qapp):
 
 
 def test_region_engine_samples_float_centimetres():
-    depth = FloatDepthMap(_float_depth_m(), PHOTO_SIZE).integration_map(CAMERA)
+    source = FloatDepthMap(_float_depth_m(), PHOTO_SIZE)
+    source.subject_depth_m = NEAR_M
+    depth = source.integration_map(CAMERA)
     engine = RegionMeasurementEngine(
         filtered_depthmap=depth,
         display_size=(480, 640),
@@ -227,7 +240,7 @@ def test_region_engine_samples_float_centimetres():
         camera=CAMERA,
     )
     x, y, cm = engine._sample_region(Region(20, 20, 60, 60))
-    assert np.allclose(cm, NEAR_M * 100, rtol=1e-12)
+    assert np.allclose(cm, NEAR_M * 100, rtol=FLOAT32_REL, atol=0)
     _, _, holes = engine._sample_region(Region(95, 295, 115, 315))
     assert np.isnan(holes).any()
     assert np.isfinite(holes).any()
@@ -245,7 +258,7 @@ def test_region_tool_on_float_depth(qapp):
     for sample in result.samples:
         start = _point_mm(sample.start.x, sample.start.y, NEAR_M)
         end = _point_mm(sample.end.x, sample.end.y, NEAR_M)
-        assert sample.linear_mm == pytest.approx(math.dist(start, end), rel=1e-9)
+        assert sample.linear_mm == pytest.approx(math.dist(start, end), rel=FLOAT32_REL)
     assert "Linear 3D:" in window.regionResultEdit.toPlainText()
     window.close()
 
@@ -294,7 +307,10 @@ def _synthetic_neck_codes():
     return codes[::6, ::6], kwargs
 
 
-def test_neck_arc_on_float_depth_matches_the_8bit_result():
+def test_neck_arc_on_float_depth_finds_the_synthetic_neck():
+    """Ground truth from the synthetic geometry, not from the 8-bit path: the
+    neck column spans photo x = 450 +- 150 (a 300 px wide hill with vertical
+    flanks), so its width is 300 px * Z / fx at the chin's distance."""
     codes, kwargs = _synthetic_neck_codes()
     float_min, float_max = 0.5, 4.0
     image = Image.fromarray(codes.astype(np.uint8), mode="L")
@@ -302,16 +318,24 @@ def test_neck_arc_on_float_depth_matches_the_8bit_result():
     depth = FloatDepthMap(depth_m, (kwargs["photo_width"], kwargs["photo_height"]))
     camera = CameraModel(fx=2700.0, fy=2720.0, cx=440.0, cy=610.0)
 
-    legacy = compute_neck_arc(
-        image, float_min=float_min, float_max=float_max, camera=camera, **kwargs
-    )
     result = compute_neck_arc(
         None, float_min=None, float_max=None, camera=camera, depth=depth, **kwargs
     )
+    legacy = compute_neck_arc(
+        image, float_min=float_min, float_max=float_max, camera=camera, **kwargs
+    )
 
-    assert legacy is not None and result is not None
-    assert result.circumference_mm == pytest.approx(legacy.circumference_mm, rel=0.02)
-    assert result.measuring_y == pytest.approx(legacy.measuring_y, abs=3)
+    assert result is not None and legacy is not None
+    # Edges within two depth pixels (6 photo px each) of the true flanks.
+    assert result.left_x == pytest.approx(300, abs=12)
+    assert result.right_x == pytest.approx(600, abs=12)
+    true_width_mm = 300 * result.debug["chin_z_mm"] / camera.fx
+    assert result.raw_width_mm == pytest.approx(true_width_mm, rel=0.05)
+    # The float path is at least as close to the truth as the 8-bit one.
+    legacy_true_mm = 300 * legacy.debug["chin_z_mm"] / camera.fx
+    assert abs(result.raw_width_mm / true_width_mm - 1) <= abs(
+        legacy.raw_width_mm / legacy_true_mm - 1
+    )
 
 
 # ------------------------------------------------------------- depth label
