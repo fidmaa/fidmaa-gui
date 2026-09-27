@@ -20,6 +20,7 @@ from portrait_analyser.incisor import (
     depth_raw_to_distance_cm,
     pixel_to_mm,
     pixels_per_mm_at_distance,
+    raw_depth_to_distance_cm,
     vector_length_3d,
 )
 from portrait_analyser.ios import IOSPortrait, load_image
@@ -56,7 +57,14 @@ from PySide6.QtWidgets import (
 
 from . import const, errors
 from .calculations import findPoint, lower_jaw_x_bounds, neck_to_jaw_width_ratio
-from .depth_source import combine_warnings, depth_source_status, portrait_camera
+from .depth_source import (
+    IMPLAUSIBLE_DEPTH_NA,
+    combine_warnings,
+    depth_is_implausible,
+    depth_source_status,
+    depth_zero_is_invalid,
+    portrait_camera,
+)
 from .depth_visualization import (
     DepthDisplayMode,
     boost_matte,
@@ -89,6 +97,8 @@ from .utils import (
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 tr = QObject.tr
+
+IMPLAUSIBLE_DEPTH_DETAIL = "Depth looks implausible — measurements disabled."
 
 
 def _show_3d_view(image, depthmap, float_min, float_max):
@@ -584,6 +594,17 @@ class MainWindow(UILoaderMixin, QMainWindow):
         if result is None or not result.segments:
             self.measurementPanel.set_tool_result(self.current_tool.value, None, None, [], hint)
             return
+        if depth_is_implausible(self.portrait):
+            # Nothing measured on this photo, so nothing goes to the history.
+            self.measurementPanel.set_tool_result(
+                self.current_tool.value,
+                None,
+                None,
+                [IMPLAUSIBLE_DEPTH_DETAIL],
+                hint,
+                unavailable=IMPLAUSIBLE_DEPTH_NA,
+            )
+            return
 
         details = []
         if self.current_tool == MeasurementTool.VECTOR:
@@ -624,6 +645,16 @@ class MainWindow(UILoaderMixin, QMainWindow):
             )
 
     def _show_region_tool_result(self):
+        if depth_is_implausible(getattr(self, "portrait", None)):
+            self.measurementPanel.set_tool_result(
+                MeasurementTool.REGION.value,
+                None,
+                None,
+                [IMPLAUSIBLE_DEPTH_DETAIL],
+                self.TOOL_HINTS[MeasurementTool.REGION],
+                unavailable=IMPLAUSIBLE_DEPTH_NA,
+            )
+            return
         result = self.region_measurement_result
         linear = result.linear_stats() if result is not None else None
         surface = result.surface_stats() if result is not None else None
@@ -995,6 +1026,13 @@ class MainWindow(UILoaderMixin, QMainWindow):
             return
         if self.filtered_depthmap is None or not hasattr(self, "image"):
             self.regionResultEdit.setPlainText("Load an image with depth data first.")
+            self.region_measurement_result = None
+            self._refresh_region_tool_result()
+            return
+        if depth_is_implausible(self.portrait):
+            self.regionResultEdit.setPlainText(
+                f"{IMPLAUSIBLE_DEPTH_NA}\n{IMPLAUSIBLE_DEPTH_DETAIL}"
+            )
             self.region_measurement_result = None
             self._refresh_region_tool_result()
             return
@@ -1834,11 +1872,25 @@ class MainWindow(UILoaderMixin, QMainWindow):
         """Returns a distance from a given depthMap value in centimeters
         using EXIF data from TrueDepth[tm] camera
 
-        :returns: distance in centimeters
+        :returns: distance in centimeters, or None when the depth must not be
+            used: the photo's depth is implausible, or ``value`` is code 0 of
+            a capture-app depth map ("no depth", which would otherwise read
+            as the farthest distance)
         """
         if self.float_min_value is None or self.float_max_value is None:
             return value
 
+        portrait = getattr(self, "portrait", None)
+        if depth_is_implausible(portrait):
+            return None
+        if np.ndim(value) == 0:
+            if depth_zero_is_invalid(portrait) and value == 0:
+                return None
+            return raw_depth_to_distance_cm(
+                value, self.float_min_value, self.float_max_value, portrait_camera(self)
+            )
+        # Arrays (region engine): vectorised legacy conversion; the engine
+        # already treats raw 0 as invalid before converting.
         return depth_raw_to_distance_cm(value, self.float_min_value, self.float_max_value)
 
     def redrawZoom(self, *args, **kw):
@@ -2484,8 +2536,13 @@ class MainWindow(UILoaderMixin, QMainWindow):
         )
 
     def click_to_3d(self, x, y):
+        """Display point -> (x_mm, y_mm, z_mm), or None for invalid depth."""
         z_cm = self.distance_for_click(x, y)
+        if z_cm is None:
+            return None
         x, y = self.translate_click_to_mm(z_cm, x, y)
+        if x is None or y is None:
+            return None
         z_mm = z_cm * 10
         return x, y, z_mm
 
@@ -2508,14 +2565,11 @@ class MainWindow(UILoaderMixin, QMainWindow):
         s = []
 
         for (x1, y1), (x2, y2) in zip(pixels, pixels[1:], strict=False):
-            z1 = self.distance_for_click(x1, y1) * 10  # cm → mm
-            x1, y1 = self.translate_click_to_mm(z1 / 10, x1, y1)
-
-            z2 = self.distance_for_click(x2, y2) * 10  # cm → mm
-            x2, y2 = self.translate_click_to_mm(z2 / 10, x2, y2)
-
-            line_len_3d = self.vector_length_simple(x1, y1, z1, x2, y2, z2)
-            s.append(line_len_3d)
+            point_1 = self.click_to_3d(x1, y1)
+            point_2 = self.click_to_3d(x2, y2)
+            if point_1 is None or point_2 is None:
+                return None  # invalid depth along the line
+            s.append(self.vector_length_simple(*point_1, *point_2))
         return sum(s)
 
     def surface_vector_filtered(
@@ -2537,6 +2591,9 @@ class MainWindow(UILoaderMixin, QMainWindow):
         """
         if step <= 0:
             raise ValueError("step must be greater than zero")
+
+        if depth_is_implausible(getattr(self, "portrait", None)):
+            return None
 
         if self.filtered_depthmap is None:
             self.filtered_depthmap = median_filter_depthmap(self.depthmap, size=3)
@@ -2570,39 +2627,13 @@ class MainWindow(UILoaderMixin, QMainWindow):
         """Simple mathematical lenght of the vector"""
         return vector_length_3d(x1, y1, z1, x2, y2, z2)
 
-    def vector_length_between_two_clicks(self, x1, y1, x2, y2):
-        z1 = self.get_depthmap_value(x1, y1)
-        z2 = self.get_depthmap_value(x2, y2)
-
-        distance_z1 = self.get_depthmap_distance(z1) * 10  # cm → mm
-        distance_z2 = self.get_depthmap_distance(z2) * 10  # cm → mm
-
-        distance_x1, distance_y1 = self.translate_click_to_mm(
-            distance_z1 / 10,
-            x1,
-            y1,
-        )
-        distance_x2, distance_y2 = self.translate_click_to_mm(
-            distance_z2 / 10,
-            x2,
-            y2,
-        )
-        return self.vector_length_simple(
-            distance_x1,
-            distance_y1,
-            distance_z1,
-            distance_x2,
-            distance_y2,
-            distance_z2,
-        )
-
     def linear_length_between_two_clicks_or_none(self, x1, y1, x2, y2):
-        """Like vector_length_between_two_clicks(), but returns None instead of
-        raising when either point's depth is invalid (zero disparity, or a
-        distance outside the calibrated 15-80cm range so pixel_to_mm() can't
-        locate the point). Used by the Vector/Polyline tools, which must be
-        able to show "n/a" for a bad point rather than crash; legacy callers
-        of vector_length_between_two_clicks() are unaffected.
+        """3-D distance between two display points, or None when either
+        point's depth is invalid: zero disparity, code 0 of a capture-app
+        depth map ("no depth"), implausible depth, or a distance outside the
+        range pixel_to_mm() accepts (15-80 cm polynomial, 10-150 cm pinhole).
+        Used by the Vector/Polyline tools and the diagnostics text, which
+        show "n/a" for a bad point rather than crash.
         """
         z1 = self.get_depthmap_value(x1, y1)
         z2 = self.get_depthmap_value(x2, y2)
@@ -2880,8 +2911,11 @@ class MainWindow(UILoaderMixin, QMainWindow):
                         fill=0,
                     )
 
+        # Implausible depth (e.g. inverted capture-app map): measure nothing.
+        depth_measurable = not depth_is_implausible(self.portrait)
         if (
-            self.portrait.skinmap
+            depth_measurable
+            and self.portrait.skinmap
             and self.portrait.depthmap
             and self.neck_midpoint
             and self.neck_midpoint.x is not None
@@ -2916,7 +2950,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
         # the skin matte, so it is not fooled by bare skin running continuously
         # from jaw to chest (see NECK_DETECTOR_STATUS.md).
         if (
-            face_mesh_landmarks is not None
+            depth_measurable
+            and face_mesh_landmarks is not None
             and self.filtered_depthmap is not None
             and self.neck_midpoint is not None
             and self.neck_midpoint.pose == PortraitPose.NEUTRAL_NECK
@@ -2933,6 +2968,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
                     float_min=self.portrait.floatValueMin,
                     float_max=self.portrait.floatValueMax,
                     camera=portrait_camera(self),
+                    zero_is_invalid=depth_zero_is_invalid(self.portrait),
                 )
             except (IndexError, ValueError) as e:
                 print(f"compute_neck_arc failed: {type(e).__name__}: {e}")
@@ -2952,6 +2988,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
         """FaceMesh mouth opening fallback, only when the user opted in."""
         self.mouth_measurement = None
         if not self.mouthOpeningAction.isChecked():
+            return
+        if depth_is_implausible(self.portrait):
             return
         if (
             self.neck_midpoint
@@ -2991,6 +3029,12 @@ class MainWindow(UILoaderMixin, QMainWindow):
             return
 
         lines = [f"Pose: {pose.value.upper()}"]
+        if depth_is_implausible(self.portrait):
+            # No automatic millimetre values from depth that cannot be trusted.
+            lines.append(f"Automatic measurements: {IMPLAUSIBLE_DEPTH_NA}")
+            lines.append(depth_line)
+            self.measurementPanel.set_automatic_results(lines, depth_warning)
+            return
         warning = None
         if pose == PortraitPose.NEUTRAL_NECK:
             if self.neck_arc is not None:
@@ -3056,7 +3100,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
                         self.portrait.incisor_distance[2:4], teeth_size, img_size
                     )
                     txt += "\nAutomatic incisor distance (legacy): "
-                    txt += "%.2f cm" % (self.vector_length_between_two_clicks(*start, *end) / 10.0)
+                    legacy_mm = self.linear_length_between_two_clicks_or_none(*start, *end)
+                    txt += "n/a" if legacy_mm is None else "%.2f cm" % (legacy_mm / 10.0)
                 im = self.portrait.incisor_measurement
                 if im and im.distance_3d_mm is not None:
                     txt += "\nAutomatic incisor distance (centroid): "
@@ -3153,15 +3198,18 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 )
                 diameter_mm = nma.front_chord_length_mm
                 if diameter_mm is None:
-                    diameter_mm = self.vector_length_between_two_clicks(
+                    diameter_mm = self.linear_length_between_two_clicks_or_none(
                         *left_display, *right_display
                     )
-                circumference_from_diameter_mm = diameter_mm * math.pi
-                txt += (
-                    "\n\nNeck approximation from Euclidean diameter × π:"
-                    f" {circumference_from_diameter_mm / 10.0:.2f} cm"
-                    f"\n  Diameter (3D): {diameter_mm / 10.0:.2f} cm"
-                )
+                if diameter_mm is None:
+                    txt += "\n\nNeck approximation from Euclidean diameter × π: n/a"
+                else:
+                    circumference_from_diameter_mm = diameter_mm * math.pi
+                    txt += (
+                        "\n\nNeck approximation from Euclidean diameter × π:"
+                        f" {circumference_from_diameter_mm / 10.0:.2f} cm"
+                        f"\n  Diameter (3D): {diameter_mm / 10.0:.2f} cm"
+                    )
                 txt += "\n  Straight-row surface vector (median depth):"
                 for step in (2, 3, 5):
                     surface_mm = self.surface_vector_filtered(

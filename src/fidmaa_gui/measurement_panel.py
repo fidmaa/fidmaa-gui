@@ -115,9 +115,17 @@ class MeasurementPanel(QWidget):
             self.autoWarningLabel.clear()
             self.autoWarningLabel.hide()
 
-    def set_tool_result(self, title, linear_mm, surface_mm, details, hint):
+    def set_tool_result(self, title, linear_mm, surface_mm, details, hint, unavailable=None):
+        """Show the active tool's result.
+
+        ``unavailable`` replaces both values with that text (e.g.
+        "n/a (implausible depth)") when the photo cannot be measured at all.
+        """
         self.resultGroup.setTitle(title)
-        if not details:
+        if unavailable:
+            self.linearValueLabel.setText(unavailable)
+            self.surfaceValueLabel.setText(unavailable)
+        elif not details:
             # No measurement has been attempted yet (blank slate): dashes,
             # not "n/a (invalid depth)" which implies a real measurement
             # failed.

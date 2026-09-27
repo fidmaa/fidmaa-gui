@@ -116,12 +116,17 @@ def depth_band_mm(
     y_start,
     y_end,
     background_cutoff_mm=None,
+    zero_is_invalid=False,
 ):
     """Distance-from-camera in mm for photo rows [y_start, y_end).
 
     Returns NaN where depth is invalid, or beyond `background_cutoff_mm`
     (the wall behind the subject, which would otherwise dominate every
     derivative taken near the silhouette).
+
+    With `zero_is_invalid` (capture-app depth maps, where code 0 is "no
+    depth"), photo pixels whose bilinear resample touched a code-0 depth
+    pixel are invalid too, so holes never blend into their neighbours.
     """
     y_start = max(0, int(y_start))
     y_end = min(int(photo_height), int(y_end))
@@ -133,6 +138,12 @@ def depth_band_mm(
 
     disparity = float_max * raw / 255.0 + float_min * (1.0 - raw / 255.0)
     valid = (raw > 0) & (disparity != 0)
+    if zero_is_invalid:
+        valid_codes = (np.asarray(filtered_depthmap.convert("L")) > 0).astype(np.uint8) * 255
+        coverage = Image.fromarray(valid_codes, mode="L").resize(
+            (photo_width, photo_height), resample=Image.Resampling.BILINEAR
+        )
+        valid &= np.asarray(coverage)[y_start:y_end] == 255
     z_mm = np.full(raw.shape, np.nan)
     z_mm[valid] = (100.0 / disparity[valid]) * 10.0
     if background_cutoff_mm is not None:
@@ -233,6 +244,7 @@ def compute_neck_arc(
     float_max,
     n_samples=None,
     camera=None,
+    zero_is_invalid=False,
 ):
     """Measure the neck along a curve parallel to the lower face oval.
 
@@ -243,6 +255,7 @@ def compute_neck_arc(
     `camera` is the photo's portrait_analyser CameraModel (TrueDepth
     capture-app intrinsics) or None for the legacy calibration polynomial.
     The horizontal focal length sets the pixels-per-mm scale.
+    `zero_is_invalid`: raw code 0 means "no depth" (capture-app maps).
     """
     if not jaw_points or float_min is None or float_max is None:
         return None
@@ -276,6 +289,7 @@ def compute_neck_arc(
         float_max,
         band_start,
         band_end,
+        zero_is_invalid=zero_is_invalid,
     )
     if band is None:
         return None

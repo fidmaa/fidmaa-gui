@@ -27,8 +27,9 @@ from fidmaa_gui.depth_source import (
     depth_source_status,
     portrait_camera,
 )
-from fidmaa_gui.neck_arc import compute_neck_arc
-from fidmaa_gui.region_measurement import RegionMeasurementEngine
+from fidmaa_gui.measurement_tools import MeasurementTool
+from fidmaa_gui.neck_arc import compute_neck_arc, depth_band_mm
+from fidmaa_gui.region_measurement import Region, RegionMeasurementEngine
 
 # Intrinsics of IMG_2346 (capture app, 3024x4032 upright photo).
 PHOTO_SIZE = (3024, 4032)
@@ -467,3 +468,190 @@ def test_no_depth_error_dialog_shows_library_reason(qapp, monkeypatch):
 
 def test_no_depth_error_without_message_is_the_generic_text():
     assert errors.no_depth_data_error(NoDepthMapFound()) == errors.NO_DEPTH_DATA_ERROR
+
+
+# ------------------------------------------------ implausible depth (IMG_2348)
+
+
+def _inverted_depth_portrait(**overrides):
+    """Capture-app portrait whose depth came out inverted: the skin (face)
+    reads ~3 m and the background ~0.6 m."""
+    depth_m = np.full((64, 48), 0.6, dtype=np.float32)
+    depth_m[10:40, 12:36] = 3.0
+    skin = Image.new("L", PHOTO_SIZE, 0)
+    skin.paste(255, (12 * 63, 10 * 63, 36 * 63, 40 * 63))
+    fields = dict(
+        camera=CAMERA,  # the library may still provide intrinsics
+        depth_accuracy="absolute",
+        depth_plausible=False,
+        depth_code_zero_is_invalid=True,
+        depth_m=depth_m,
+        skinmap=skin,
+        hairmap=None,
+        teeth_bbox=None,
+        teethmap=None,
+        incisor_measurement=SimpleNamespace(
+            distance_3d_mm=328.6, weak_arch=None, depth_assumed=None
+        ),
+    )
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
+
+
+def test_implausible_depth_status_line_and_warning():
+    line, warning = depth_source_status(_inverted_depth_portrait())
+
+    assert "TrueDepth absolute" not in line
+    assert "implausible" in line
+    assert warning == (
+        "Depth looks implausible (face ~300 cm, background ~60 cm) — measurements disabled."
+    )
+
+
+def test_implausible_depth_without_alignment_detail():
+    _, warning = depth_source_status(_inverted_depth_portrait(depth_m=None))
+    assert warning == "Depth looks implausible — measurements disabled."
+
+
+def test_implausible_depth_hides_automatic_measurements(qapp):
+    window = _neutral_window("absolute")
+    window.portrait = _inverted_depth_portrait()
+    window.neck_midpoint = SimpleNamespace(pose=PortraitPose.OPEN_MOUTH, x=None)
+    window._update_automatic_results()
+
+    text = window.measurementPanel.autoLabel.text()
+    assert "Incisor distance" not in text
+    assert " cm" not in text.replace("n/a", "")
+    assert "n/a (implausible depth)" in text
+    assert "TrueDepth absolute" not in text
+    warning = window.measurementPanel.autoWarningLabel
+    assert not warning.isHidden()
+    assert "face ~300 cm, background ~60 cm" in warning.text()
+    assert "measurements disabled" in warning.text()
+    window.close()
+
+
+def test_implausible_depth_disables_vector_and_polyline(qapp):
+    window = _capture_app_window(Image.new("L", (480, 640), 160))
+    window.portrait = _inverted_depth_portrait(incisor_measurement=None)
+
+    assert window.linear_length_between_two_clicks_or_none(100, 100, 100, 300) is None
+    assert window.surface_vector_filtered(100, 100, 100, 300, 3) is None
+
+    window._on_image_clicked(QPointF(100, 100))
+    window._on_image_clicked(QPointF(100, 300))
+    panel = window.measurementPanel
+    assert panel.linearValueLabel.text() == "n/a (implausible depth)"
+    assert panel.surfaceValueLabel.text() == "n/a (implausible depth)"
+    assert len(panel.history.entries) == 0
+
+    window.set_tool(MeasurementTool.POLYLINE)
+    for point in ((100, 100), (100, 300), (200, 300)):
+        window._on_image_clicked(QPointF(*point))
+    assert panel.linearValueLabel.text() == "n/a (implausible depth)"
+    window.close()
+
+
+def test_implausible_depth_disables_region_tool(qapp):
+    window = _capture_app_window(Image.new("L", (480, 640), 160))
+    window.portrait = _inverted_depth_portrait(incisor_measurement=None)
+    window.set_tool(MeasurementTool.REGION)
+    window.region_a = Region(70, 70, 130, 130)
+    window.region_b = Region(270, 270, 330, 330)
+
+    window._calculate_region_measurement()
+
+    assert window.region_measurement_result is None
+    assert window.regionResultEdit.toPlainText().startswith("n/a (implausible depth)")
+    assert window.measurementPanel.linearValueLabel.text() == "n/a (implausible depth)"
+    window.close()
+
+
+# ----------------------------------------------- code 0 = no depth (capture)
+
+
+def test_code_zero_hole_under_a_click_is_na_not_far_depth(qapp):
+    depth = Image.new("L", (480, 640), 160)
+    depth.paste(0, (90, 290, 110, 310))  # hole under the second click
+    window = _capture_app_window(depth)
+    window.portrait.depth_code_zero_is_invalid = True
+
+    assert window.get_depthmap_distance(0) is None
+    assert window.linear_length_between_two_clicks_or_none(100, 100, 100, 300) is None
+
+    window._on_image_clicked(QPointF(100, 100))
+    window._on_image_clicked(QPointF(100, 300))
+    assert window.measurementPanel.linearValueLabel.text() == "n/a (invalid depth)"
+    assert "Δ depth: n/a" in window.measurementPanel.detailsLabel.text()
+    window.close()
+
+
+def test_code_zero_is_invalid_even_without_a_camera(qapp):
+    """Relative-accuracy capture-app files have no camera model but code 0
+    still means "no depth"."""
+    window = _capture_app_window(Image.new("L", (480, 640), 160))
+    window.portrait = SimpleNamespace(camera=None, depth_code_zero_is_invalid=True)
+    assert window.get_depthmap_distance(0) is None
+    assert window.get_depthmap_distance(160) == pytest.approx(_distance_cm(160))
+    window.close()
+
+
+def test_legacy_code_zero_is_still_the_farthest_depth(qapp):
+    window = MainWindow()
+    window.float_min_value = 0.5
+    window.float_max_value = 5.0
+    window.portrait = SimpleNamespace(camera=None, depth_code_zero_is_invalid=False)
+    assert window.get_depthmap_distance(0) == pytest.approx(100.0 / 0.5)
+    window.portrait = None
+    assert window.get_depthmap_distance(0) == pytest.approx(100.0 / 0.5)
+    window.close()
+
+
+def test_pinhole_depth_out_of_range_is_na_not_a_crash(qapp):
+    # raw 1 with these calibration values is ~2.9 m: outside 10-150 cm.
+    window = _capture_app_window(Image.new("L", (480, 640), 1))
+    window.portrait.depth_code_zero_is_invalid = True
+    assert window.get_depthmap_distance(1) > 150
+
+    window._on_image_clicked(QPointF(100, 100))
+    window._on_image_clicked(QPointF(100, 300))
+    assert window.measurementPanel.linearValueLabel.text() == "n/a (invalid depth)"
+    assert window.measurementPanel.surfaceValueLabel.text() == "n/a (invalid depth)"
+    window.close()
+
+
+def test_neck_arc_band_treats_code_zero_holes_as_invalid():
+    img = Image.new("L", (40, 40), 200)
+    img.putpixel((20, 5), 0)  # a one-pixel hole
+    legacy = depth_band_mm(img, 80, 80, 0.5, 4.0, 0, 20)
+    capture = depth_band_mm(img, 80, 80, 0.5, 4.0, 0, 20, zero_is_invalid=True)
+
+    # Bilinear upsampling blends the hole into its neighbours: legacy keeps
+    # those blended (wrong, farther) values, capture-app mode drops them.
+    assert np.isfinite(legacy[10, 42])
+    assert not np.isfinite(capture[10, 42])
+    assert np.isfinite(capture[10, 10])
+    assert np.nanmax(capture) == pytest.approx(np.nanmin(capture))
+
+
+# ------------------------------------------------ CameraModel width/height
+
+
+def test_camera_matching_the_photo_is_used_as_is():
+    camera = CameraModel(2766.1, 2766.1, 1499.1, 2019.6, width=3024, height=4032)
+    window = SimpleNamespace(
+        image=SimpleNamespace(size=PHOTO_SIZE), portrait=SimpleNamespace(camera=camera)
+    )
+    assert portrait_camera(window) is camera
+
+
+def test_camera_for_another_resolution_is_rescaled_to_the_photo():
+    camera = CameraModel(5532.2, 5532.2, 2998.2, 4039.2, width=6048, height=8064)
+    window = SimpleNamespace(
+        image=SimpleNamespace(size=PHOTO_SIZE), portrait=SimpleNamespace(camera=camera)
+    )
+    scaled = portrait_camera(window)
+    assert (scaled.fx, scaled.fy, scaled.cx, scaled.cy) == pytest.approx(
+        (2766.1, 2766.1, 1499.1, 2019.6)
+    )
+    assert (scaled.width, scaled.height) == PHOTO_SIZE
