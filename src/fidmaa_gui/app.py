@@ -3006,6 +3006,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 float_min=self.portrait.floatValueMin,
                 float_max=self.portrait.floatValueMax,
                 camera=portrait_camera(self),
+                zero_is_invalid=getattr(self.portrait, "depth_code_zero_is_invalid", None),
             )
             if self.mouth_measurement is None or self.mouth_measurement.distance_3d_mm is None:
                 print("FaceMesh mouth measurement: depth conversion failed")
