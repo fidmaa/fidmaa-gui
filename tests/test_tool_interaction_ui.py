@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 from PIL import Image
 from portrait_analyser.depth_sampling import median_filter_depthmap
+from portrait_analyser.exceptions import NoDepthMapFound
 from portrait_analyser.pose import PortraitPose
 from PySide6 import QtGui
 from PySide6.QtCore import QPoint, QPointF, Qt
@@ -106,6 +107,22 @@ def test_region_panel_result_is_refreshed_on_clear_and_failure(qapp):
     window.close()
 
 
+def test_escape_clears_region_measurement(qapp):
+    """F7: Esc previously did nothing in Region mode; the global constraint
+    is that Esc clears the current measurement in every tool."""
+    window = MainWindow()
+    window.show()
+    window.set_tool(MeasurementTool.REGION)
+    window.region_a = Region(50, 50, 100, 100)
+    window.region_b = Region(50, 150, 100, 200)
+
+    QTest.keyClick(window, Qt.Key_Escape)
+
+    assert window.region_a is None
+    assert window.region_b is None
+    window.close()
+
+
 def _window_with_flat_depth():
     window = MainWindow()
     depth = Image.new("RGB", (480, 640), (30, 30, 30))
@@ -116,6 +133,65 @@ def _window_with_flat_depth():
     window.float_max_value = 4.0
     window.filename = "/tmp/patient.heic"
     return window
+
+
+def _window_with_half_invalid_depth():
+    """Left half (x<240) is calibrated depth (raw 128, ~36cm); right half is
+    raw 0, which depth_raw_to_distance_cm() maps to ~200cm -- outside the
+    15-80cm calibrated range, so pixel_to_mm() returns None for it (F1)."""
+    window = MainWindow()
+    depth = Image.new("RGB", (480, 640), (128, 128, 128))
+    pixels = depth.load()
+    for y in range(640):
+        for x in range(240, 480):
+            pixels[x, y] = (0, 0, 0)
+    window.image = Image.new("RGB", (480, 640))
+    window.depthmap = depth
+    window.filtered_depthmap = median_filter_depthmap(depth, size=3)
+    window.float_min_value = 0.5
+    window.float_max_value = 5.0
+    window.filename = "/tmp/patient.heic"
+    return window
+
+
+def test_vector_across_invalid_depth_shows_na_and_does_not_raise(qapp):
+    window = _window_with_half_invalid_depth()
+
+    window._on_image_clicked(QPointF(100, 100))  # calibrated depth
+    window._on_image_clicked(QPointF(400, 100))  # raw 0 -> uncalibrated; must not raise
+
+    assert window.measurementPanel.linearValueLabel.text() == "n/a (invalid depth)"
+    assert "Δ depth: n/a" in window.measurementPanel.detailsLabel.text()
+
+    entries = window.measurementPanel.history.entries
+    assert len(entries) == 1
+    assert entries[0].linear_mm is None
+    window.close()
+
+
+def test_polyline_through_invalid_depth_recovers_and_records_history(qapp):
+    window = _window_with_half_invalid_depth()
+    window.show()
+    window.set_tool(MeasurementTool.POLYLINE)
+
+    window._on_image_clicked(QPointF(100, 100))  # calibrated
+    window._on_image_clicked(QPointF(400, 100))  # uncalibrated point; used to raise here
+    window._on_image_clicked(QPointF(100, 300))  # calibrated again; must not raise either
+    window._begin_point_drag(QPointF(100, 300))
+    window._drag_point(QPointF(120, 300))
+    window._finish_point_drag(QPointF(120, 300))
+    QTest.keyClick(window, Qt.Key_Return)  # finish; must not raise
+
+    # Points are kept (and thus drawn), including the one over invalid depth.
+    assert window.polyline_editor.points == [(100.0, 100.0), (400.0, 100.0), (120.0, 300.0)]
+
+    entries = window.measurementPanel.history.entries
+    assert len(entries) == 1
+    assert entries[0].points == 3
+    assert entries[0].linear_mm is None  # a segment crossed invalid depth
+    # History row is recorded with empty cells for the invalid columns.
+    assert window.measurementPanel.historyTable.item(0, 3).text() == ""
+    window.close()
 
 
 def test_vector_two_clicks_show_linear_and_surface_and_add_history(qapp):
@@ -153,6 +229,25 @@ def test_dragging_a_finished_vector_point_updates_the_same_history_row(qapp):
     assert len(entries) == 1
     assert entries[0].linear_mm > before
     assert window.polyline_editor.points[1] == (100.0, 400.0)
+    window.close()
+
+
+def test_clearing_history_resets_stale_index_so_next_change_adds_a_row(qapp):
+    """F2: without resetting _tool_history_index on Clear, the next update
+    (e.g. a Step spin box change) does measurementPanel.history.replace()
+    against an empty history and raises IndexError."""
+    window = _window_with_flat_depth()
+    window._on_image_clicked(QPointF(100, 100))
+    window._on_image_clicked(QPointF(100, 300))
+    assert len(window.measurementPanel.history.entries) == 1
+
+    window.measurementPanel.clear_history()
+    assert window._tool_history_index is None
+
+    window.surfaceStepSpin.setValue(window.surfaceStepSpin.value() + 1)  # must not raise
+
+    entries = window.measurementPanel.history.entries
+    assert len(entries) == 1
     window.close()
 
 
@@ -197,6 +292,26 @@ def test_backspace_and_escape_edit_polyline(qapp):
     window.close()
 
 
+def test_backspace_reaches_polyline_after_focus_was_on_a_spin_box(qapp):
+    """F5: a click must move focus to imageLabel, so Backspace/Enter/Esc sent
+    right after editing a spin box still reach MainWindow.keyPressEvent
+    instead of being consumed by the spin box."""
+    window = _window_with_flat_depth()
+    window.show()
+    QTest.qWaitForWindowActive(window)
+    window.set_tool(MeasurementTool.POLYLINE)
+    window.surfaceStepSpin.setFocus()
+
+    window._on_image_clicked(QPointF(60, 100))
+    window._on_image_clicked(QPointF(60, 200))
+    assert window.ui.imageLabel.hasFocus()
+    assert len(window.polyline_editor.points) == 2
+
+    QTest.keyClick(window.ui.imageLabel, Qt.Key_Backspace)
+    assert len(window.polyline_editor.points) == 1
+    window.close()
+
+
 def test_tools_do_not_crash_without_a_photo(qapp):
     window = MainWindow()
     window.show()
@@ -210,17 +325,102 @@ def test_tools_do_not_crash_without_a_photo(qapp):
     window.close()
 
 
-def test_loading_new_photo_clears_points_but_keeps_history(qapp):
+def _stub_portrait(float_min=2.0, float_max=4.0):
+    return SimpleNamespace(
+        photo=Image.new("RGB", (480, 640)),
+        depthmap=Image.new("RGB", (480, 640), (30, 30, 30)),
+        teethmap=None,
+        skinmap=None,
+        hairmap=None,
+        teeth_bbox=None,
+        incisor_distance=None,
+        incisor_measurement=None,
+        floatValueMin=float_min,
+        floatValueMax=float_max,
+    )
+
+
+def test_hint_is_refreshed_after_a_photo_loads(qapp, monkeypatch):
+    """F4: _update_tool_result() used to only run again on the next click, so
+    the "Open a photo with depth data first." hint stayed stale right after
+    a photo successfully loaded, through the real _run_detection_and_update()."""
+    window = MainWindow()
+    assert "Open a photo with depth data first." in window.measurementPanel.hintLabel.text()
+
+    monkeypatch.setattr("fidmaa_gui.app.load_image", lambda *a, **k: _stub_portrait())
+    # Keep the (real, unstubbed) detection pipeline fast/deterministic: no
+    # face/neck is "detected" so _run_detection_and_update() takes its
+    # no-face path, which pops a modal via critical_error() -- stub that too.
+    monkeypatch.setattr("fidmaa_gui.app.detect_neck_midpoint", lambda image: (None, None, None))
+    monkeypatch.setattr(
+        "portrait_analyser.extended_neck.detect_neck_midpoint_from_segmentation",
+        lambda image: (None, None),
+    )
+    monkeypatch.setattr(window, "critical_error", lambda err: None)
+
+    window._loadImage("/tmp/photo.heic")
+
+    assert "Open a photo with depth data first." not in window.measurementPanel.hintLabel.text()
+    window.close()
+
+
+def test_loading_new_photo_clears_points_but_keeps_history(qapp, monkeypatch):
+    """F3: goes through the real _loadImage() (with load_image() and
+    _run_detection_and_update() stubbed out) rather than just calling
+    set_tool() directly, so the filename-only-set-after-success fix is
+    exercised end-to-end."""
     window = _window_with_flat_depth()
     window._on_image_clicked(QPointF(100, 100))
     window._on_image_clicked(QPointF(100, 300))
     window._on_image_clicked(QPointF(150, 150))
+    assert len(window.measurementPanel.history.entries) == 1
 
-    window.set_tool(window.current_tool)  # what _loadImage does before loading
+    monkeypatch.setattr("fidmaa_gui.app.load_image", lambda *a, **k: _stub_portrait())
+    monkeypatch.setattr(window, "_run_detection_and_update", lambda *a, **k: None)
 
+    window._loadImage("/tmp/second.heic")
+
+    assert window.filename == "/tmp/second.heic"
     assert window.polyline_editor.points == []
     assert len(window.measurementPanel.history.entries) == 1
     assert isinstance(window.polyline_editor, PolylineEditor)
+    window.close()
+
+
+def test_failed_load_does_not_change_filename_or_reset_measurement(qapp, monkeypatch):
+    """F3: _loadImage() used to set self.filename before attempting the load,
+    so a failed load (old photo stays on screen) left self.filename pointing
+    at a file that was never opened, mislabelling later history rows."""
+    window = _window_with_flat_depth()
+    window._on_image_clicked(QPointF(100, 100))  # in-progress measurement
+    original_filename = window.filename
+    original_points = list(window.polyline_editor.points)
+
+    def raise_no_depth(*args, **kwargs):
+        raise NoDepthMapFound("no depth data")
+
+    monkeypatch.setattr("fidmaa_gui.app.load_image", raise_no_depth)
+    monkeypatch.setattr(window, "critical_error", lambda err: None)  # avoid a modal
+
+    window._loadImage("/tmp/other.heic")
+
+    assert window.filename == original_filename
+    assert window.polyline_editor.points == original_points
+    window.close()
+
+
+def test_open3d_action_disabled_until_photo_loaded(qapp, monkeypatch):
+    """F6: opening the 3D view before a photo is loaded used to raise
+    AttributeError (no depthmap yet); disable the action until load succeeds."""
+    window = MainWindow()
+    assert not window.open3DAction.isEnabled()
+
+    monkeypatch.setattr("fidmaa_gui.app.load_image", lambda *a, **k: _stub_portrait())
+    monkeypatch.setattr(window, "_run_detection_and_update", lambda *a, **k: None)
+
+    window._loadImage("/tmp/photo.heic")
+
+    assert window.open3DAction.isEnabled()
     window.close()
 
 
@@ -315,6 +515,29 @@ def test_facemesh_mouth_opening_is_opt_in(qapp):
     window.mouthOpeningAction.setChecked(True)
     window._update_automatic_results()
     assert "Mouth opening" in window.measurementPanel.autoLabel.text()
+    window.close()
+
+
+def test_mouth_toggle_refreshes_diagnostics_text(qapp):
+    """F8: toggling the mouth-opening checkbox used to leave dataOutputEdit
+    showing stale diagnostics text until the next photo load."""
+    window = _neutral_window()
+    window.neck_midpoint = SimpleNamespace(pose=PortraitPose.OPEN_MOUTH, x=None)
+    window.mouth_measurement = SimpleNamespace(distance_3d_mm=42.0)
+    window.portrait.depthmap = window.depthmap
+    window.portrait.floatValueMin = window.float_min_value
+    window.portrait.floatValueMax = window.float_max_value
+    landmarks = [(240.0, 300.0)] * 18
+    landmarks[0] = (240.0, 295.0)  # upper lip
+    landmarks[17] = (240.0, 305.0)  # lower lip
+    window.face_mesh_debug = SimpleNamespace(landmarks=landmarks)
+
+    window.ui.dataOutputEdit.setPlainText("stale diagnostics")
+    assert "Mouth opening" not in window.ui.dataOutputEdit.toPlainText()
+
+    window.mouthOpeningAction.setChecked(True)
+
+    assert "Mouth opening" in window.ui.dataOutputEdit.toPlainText()
     window.close()
 
 

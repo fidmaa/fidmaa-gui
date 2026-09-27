@@ -159,6 +159,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
 
     def _create_measurement_panel(self):
         self.measurementPanel = MeasurementPanel()
+        self.measurementPanel.historyCleared.connect(self._on_history_cleared)
 
         self.lineOptionsWidget = QGroupBox("Surface sampling")
         line_form = QFormLayout(self.lineOptionsWidget)
@@ -281,6 +282,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.openAction.triggered.connect(self.loadJPEG)
         self.open3DAction = QAction("3D view", self)
         self.open3DAction.triggered.connect(self.open3DView)
+        self.open3DAction.setEnabled(False)
 
         file_menu = self.menuBar().addMenu("&File")
         file_menu.addAction(self.openAction)
@@ -403,6 +405,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
         if self.portrait:
             self._compute_mouth_measurement()
             self.redrawImage(force=True)
+            self.ui.dataOutputEdit.setPlainText(self._diagnostics_text())
         self._update_automatic_results()
 
     def _create_advanced_menu(self):
@@ -495,6 +498,15 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self._set_region_selection_enabled(tool == MeasurementTool.REGION)
         self._update_tool_result()
 
+    def _on_history_cleared(self, *args):
+        """Clearing the history table must not leave a stale row index behind.
+
+        Without this, the next _record_history() call (e.g. from changing
+        surfaceStepSpin) would replace() into the now-empty history and raise
+        IndexError.
+        """
+        self._tool_history_index = None
+
     def _record_history(self, tool, points, linear_mm, surface_mm):
         entry = HistoryEntry(
             filename=os.path.basename(self.filename) if self.filename else "",
@@ -515,7 +527,9 @@ class MainWindow(UILoaderMixin, QMainWindow):
         step = self.surfaceStepSpin.value()
         return measure_polyline(
             points,
-            linear_mm=lambda a, b: self.vector_length_between_two_clicks(a[0], a[1], b[0], b[1]),
+            linear_mm=lambda a, b: self.linear_length_between_two_clicks_or_none(
+                a[0], a[1], b[0], b[1]
+            ),
             surface_mm=lambda a, b: self.surface_vector_filtered(a[0], a[1], b[0], b[1], step),
         )
 
@@ -534,9 +548,15 @@ class MainWindow(UILoaderMixin, QMainWindow):
         details = []
         if self.current_tool == MeasurementTool.VECTOR:
             (ax, ay), (bx, by) = self.polyline_editor.points[:2]
-            depth_a_mm = self.get_depthmap_distance(self.get_depthmap_value(ax, ay)) * 10
-            depth_b_mm = self.get_depthmap_distance(self.get_depthmap_value(bx, by)) * 10
-            details.append(f"Δ depth: {depth_b_mm - depth_a_mm:+.1f} mm")
+            if result.linear_mm is None:
+                # Same invalid-depth rule as the linear/surface totals: a
+                # point outside the calibrated range (or zero disparity)
+                # makes the whole vector meaningless, not just its 3D length.
+                details.append("Δ depth: n/a")
+            else:
+                depth_a_cm = self.get_depthmap_distance(self.get_depthmap_value(ax, ay))
+                depth_b_cm = self.get_depthmap_distance(self.get_depthmap_value(bx, by))
+                details.append(f"Δ depth: {(depth_b_cm - depth_a_cm) * 10:+.1f} mm")
         else:
             state = "finished" if self.polyline_editor.finished else "in progress"
             details.append(f"{len(result.segments)} segments ({state})")
@@ -591,6 +611,9 @@ class MainWindow(UILoaderMixin, QMainWindow):
         )
 
     def _on_image_clicked(self, point, *args):
+        # Keep Backspace/Enter/Esc reaching MainWindow.keyPressEvent even when
+        # a spin box had focus (e.g. after editing the surface step).
+        self.ui.imageLabel.setFocus()
         if self.current_tool == MeasurementTool.REGION:
             return
         if self._suppress_next_click:
@@ -684,6 +707,10 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 self._redraw_tool_overlay()
                 event.accept()
                 return
+        elif event.key() == Qt.Key_Escape:
+            self.clear_region_measurement()
+            event.accept()
+            return
 
         super().keyPressEvent(event)
 
@@ -2476,29 +2503,61 @@ class MainWindow(UILoaderMixin, QMainWindow):
             distance_z2,
         )
 
+    def linear_length_between_two_clicks_or_none(self, x1, y1, x2, y2):
+        """Like vector_length_between_two_clicks(), but returns None instead of
+        raising when either point's depth is invalid (zero disparity, or a
+        distance outside the calibrated 15-80cm range so pixel_to_mm() can't
+        locate the point). Used by the Vector/Polyline tools, which must be
+        able to show "n/a" for a bad point rather than crash; legacy callers
+        of vector_length_between_two_clicks() are unaffected.
+        """
+        z1 = self.get_depthmap_value(x1, y1)
+        z2 = self.get_depthmap_value(x2, y2)
+
+        distance_z1 = self.get_depthmap_distance(z1)
+        distance_z2 = self.get_depthmap_distance(z2)
+        if distance_z1 is None or distance_z2 is None:
+            return None
+        distance_z1 *= 10  # cm → mm
+        distance_z2 *= 10  # cm → mm
+
+        distance_x1, distance_y1 = self.translate_click_to_mm(distance_z1 / 10, x1, y1)
+        distance_x2, distance_y2 = self.translate_click_to_mm(distance_z2 / 10, x2, y2)
+        if None in (distance_x1, distance_y1, distance_x2, distance_y2):
+            return None
+
+        return self.vector_length_simple(
+            distance_x1,
+            distance_y1,
+            distance_z1,
+            distance_x2,
+            distance_y2,
+            distance_z2,
+        )
+
     def calculate_line_length(self, dist_x, dist_y):
         line_len = math.sqrt(abs(dist_x * dist_x) + abs(dist_y * dist_y))
         return line_len
 
     def _loadImage(self, fileName):
-        self.filename = fileName
-        self.clear_region_measurement(repaint=False)
-        self.set_tool(self.current_tool)
-
+        # Load into locals first: on failure (ExifValidationFailed /
+        # NoDepthMapFound / UnknownExtension) the previous photo stays on
+        # screen, so self.filename and the in-progress measurement must be
+        # left untouched rather than pointing at a photo that never loaded.
         try:
-            self.portrait: IOSPortrait = load_image(self.filename, use_exif=False)
-            self.image = self.portrait.photo
-            self.depthmap = self.portrait.depthmap
-            self.filtered_depthmap = median_filter_depthmap(self.depthmap, size=3)
-            self.teethmap = self.portrait.teethmap
-            self.float_min_value = self.portrait.floatValueMin
-            self.float_max_value = self.portrait.floatValueMax
+            portrait: IOSPortrait = load_image(fileName, use_exif=False)
+            image = portrait.photo
+            depthmap = portrait.depthmap
+            filtered_depthmap = median_filter_depthmap(depthmap, size=3)
+            teethmap = portrait.teethmap
+            float_min_value = portrait.floatValueMin
+            float_max_value = portrait.floatValueMax
 
-            if self.float_max_value is not None:
-                self.float_max_value = float(self.float_max_value)
+            if float_max_value is not None:
+                float_max_value = float(float_max_value)
 
-            if self.float_min_value is not None:
-                self.float_min_value = float(self.float_min_value)
+            if float_min_value is not None:
+                float_min_value = float(float_min_value)
 
         except ExifValidationFailed as e:
             QMessageBox.critical(
@@ -2515,6 +2574,19 @@ class MainWindow(UILoaderMixin, QMainWindow):
         except UnknownExtension as e:
             self.critical_error(QObject.tr(f"Unknown file extension ({e})"))
             return
+
+        self.filename = fileName
+        self.clear_region_measurement(repaint=False)
+        self.set_tool(self.current_tool)
+        self.open3DAction.setEnabled(True)
+
+        self.portrait: IOSPortrait = portrait
+        self.image = image
+        self.depthmap = depthmap
+        self.filtered_depthmap = filtered_depthmap
+        self.teethmap = teethmap
+        self.float_min_value = float_min_value
+        self.float_max_value = float_max_value
 
         self.smallImage = self.image.resize((const.MAIN_IMAGE_WIDTH, const.MAIN_IMAGE_HEIGHT))
 
@@ -2775,6 +2847,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self._update_automatic_results()
         self.ui.dataOutputEdit.setPlainText(self._diagnostics_text())
         self.updateWindowTitle()
+        self._update_tool_result()
 
     def _compute_mouth_measurement(self):
         """FaceMesh mouth opening fallback, only when the user opted in."""
@@ -3111,6 +3184,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.ui.imageLabel.dragged.connect(self._drag_point)
         self.ui.imageLabel.released.connect(self._finish_point_drag)
         self.ui.imageLabel.setMouseTracking(True)
+        self.ui.imageLabel.setFocusPolicy(Qt.ClickFocus)
         self.ui.imageLabel.pointerMoved.connect(self.redrawZoom)
         self.ui.imageLabel.pointerMoved.connect(self._update_region_cursor)
         self.ui.imageLabel.pressed.connect(self._begin_region_drag)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QLocale
+from PySide6.QtCore import QLocale, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -33,6 +33,8 @@ def format_cm(value_mm: float | None) -> str:
 
 
 class MeasurementPanel(QWidget):
+    historyCleared = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.history = MeasurementHistory()
@@ -105,7 +107,10 @@ class MeasurementPanel(QWidget):
 
     def set_tool_result(self, title, linear_mm, surface_mm, details, hint):
         self.resultGroup.setTitle(title)
-        if linear_mm is None:
+        if not details:
+            # No measurement has been attempted yet (blank slate): dashes,
+            # not "n/a (invalid depth)" which implies a real measurement
+            # failed.
             self.linearValueLabel.setText("—")
             self.surfaceValueLabel.setText("—")
         else:
@@ -126,6 +131,7 @@ class MeasurementPanel(QWidget):
     def clear_history(self, *args) -> None:
         self.history.clear()
         self._refresh_history()
+        self.historyCleared.emit()
 
     def copy_history(self, *args) -> str:
         text = format_history_tsv(self.history.entries, number_format=_number)

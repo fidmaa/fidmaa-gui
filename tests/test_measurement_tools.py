@@ -86,6 +86,19 @@ def test_measure_polyline_surface_is_none_when_any_segment_is_invalid():
     assert result.segments[1].surface_mm is None
 
 
+def test_measure_polyline_linear_is_none_when_any_segment_is_invalid():
+    """F1: a segment crossing invalid/out-of-range depth invalidates the
+    polyline's linear total, independently of the surface total."""
+    result = measure_polyline(
+        [(0.0, 0.0), (1.0, 0.0), (2.0, 0.0)],
+        linear_mm=lambda a, b: None if a[0] == 1.0 else 1.0,
+        surface_mm=lambda a, b: 1.0,
+    )
+    assert result.linear_mm is None
+    assert result.segments[1].linear_mm is None
+    assert result.surface_mm == pytest.approx(2.0)
+
+
 def test_history_add_replace_and_tsv():
     history = MeasurementHistory()
     first = history.add(HistoryEntry("a.heic", MeasurementTool.VECTOR, 2, 123.4, 130.0))

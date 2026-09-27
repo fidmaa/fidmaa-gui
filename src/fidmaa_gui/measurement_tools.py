@@ -75,7 +75,7 @@ class PolylineEditor:
 class SegmentResult:
     start: Point
     end: Point
-    linear_mm: float
+    linear_mm: float | None
     surface_mm: float | None
 
 
@@ -84,7 +84,9 @@ class PolylineResult:
     segments: tuple[SegmentResult, ...]
 
     @property
-    def linear_mm(self) -> float:
+    def linear_mm(self) -> float | None:
+        if any(segment.linear_mm is None for segment in self.segments):
+            return None
         return sum(segment.linear_mm for segment in self.segments)
 
     @property
@@ -96,7 +98,7 @@ class PolylineResult:
 
 def measure_polyline(
     points: Sequence[Point],
-    linear_mm: Callable[[Point, Point], float],
+    linear_mm: Callable[[Point, Point], float | None],
     surface_mm: Callable[[Point, Point], float | None],
 ) -> PolylineResult:
     """Measure every consecutive pair; zero-length segments are skipped."""
