@@ -316,3 +316,21 @@ def test_facemesh_mouth_opening_is_opt_in(qapp):
     window._update_automatic_results()
     assert "Mouth opening" in window.measurementPanel.autoLabel.text()
     window.close()
+
+
+def test_legacy_depth_profile_ui_is_hidden_by_default_and_toggleable(qapp):
+    window = MainWindow()
+    legacy = window._legacy_profile_widgets()
+    assert window.ui.chartLabel in legacy
+    assert window.reconstructionLabel in legacy
+    assert all(widget.isHidden() for widget in legacy)
+    assert window.ui.dataOutputEdit.isHidden()
+
+    window.depthProfileAction.setChecked(True)
+    assert not any(widget.isHidden() for widget in legacy)
+    window.diagnosticsAction.setChecked(True)
+    assert not window.ui.dataOutputEdit.isHidden()
+
+    window.depthProfileAction.setChecked(False)
+    assert all(widget.isHidden() for widget in legacy)
+    window.close()

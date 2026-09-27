@@ -117,6 +117,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self._create_measurement_panel()
         self._create_toolbar_and_menus()
         self._create_analysis_menu()
+        self._create_advanced_menu()
 
         self.filename = None
 
@@ -402,6 +403,36 @@ class MainWindow(UILoaderMixin, QMainWindow):
             self._compute_mouth_measurement()
             self.redrawImage(force=True)
         self._update_automatic_results()
+
+    def _create_advanced_menu(self):
+        advanced = self.viewMenu.addMenu("Advanced")
+        self.depthProfileAction = advanced.addAction("Depth profile chart (blue line, x/y/angle)")
+        self.depthProfileAction.setCheckable(True)
+        self.depthProfileAction.toggled.connect(self._set_depth_profile_visible)
+        self.diagnosticsAction = advanced.addAction("Diagnostics text")
+        self.diagnosticsAction.setCheckable(True)
+        self.diagnosticsAction.toggled.connect(self.ui.dataOutputEdit.setVisible)
+        self._set_depth_profile_visible(False)
+        self.ui.dataOutputEdit.setVisible(False)
+
+    def _legacy_profile_widgets(self):
+        return [
+            self.ui.chartLabel,
+            self.ui.label_3,
+            self.ui.xValue,
+            self.ui.label_4,
+            self.ui.yValue,
+            self.ui.label_5,
+            self.ui.angleValue,
+            self.ui.angleSlider,
+            self.reconstructionLabel,
+        ]
+
+    def _set_depth_profile_visible(self, visible):
+        for widget in self._legacy_profile_widgets():
+            widget.setVisible(visible)
+        if hasattr(self, "portrait") and self.portrait:
+            self.redrawImage(force=True)
 
     TOOL_HINTS = {
         MeasurementTool.VECTOR: "Click two points. Drag a point to adjust it. Esc clears.",
@@ -2151,14 +2182,15 @@ class MainWindow(UILoaderMixin, QMainWindow):
 
             p1 = findPoint(x, y, direction=-1, angle=angle)
             p2 = findPoint(x, y, direction=1, angle=angle)
-            painter.drawLine(p1, p2)
+            if self.depthProfileAction.isChecked():
+                painter.drawLine(p1, p2)
 
-            if self.last_click_x is not None:
-                painter.setPen(QColor(255, 0, 0, 127))
-                painter.drawLine(
-                    QPoint(mouse_x, mouse_y),
-                    QPoint(self.last_click_x, self.last_click_y),
-                )
+                if self.last_click_x is not None:
+                    painter.setPen(QColor(255, 0, 0, 127))
+                    painter.drawLine(
+                        QPoint(mouse_x, mouse_y),
+                        QPoint(self.last_click_x, self.last_click_y),
+                    )
         finally:
             painter.end()
         self.ui.imageLabel.setPixmap(canvas)
