@@ -32,7 +32,11 @@ from dataclasses import dataclass, field
 
 import numpy as np
 from PIL import Image
-from portrait_analyser.incisor import pixel_to_mm, pixels_per_mm_at_distance, vector_length_3d
+from portrait_analyser.incisor import (
+    pixels_per_mm_at_distance,
+    point_to_mm,
+    vector_length_3d,
+)
 
 from . import const
 
@@ -228,12 +232,17 @@ def compute_neck_arc(
     float_min,
     float_max,
     n_samples=None,
+    camera=None,
 ):
     """Measure the neck along a curve parallel to the lower face oval.
 
     `jaw_points` are the FaceMesh lower-jaw landmarks in photo pixels.
     Returns a NeckArcResult, or None if any stage cannot be resolved --
     never a fabricated fallback.
+
+    `camera` is the photo's portrait_analyser CameraModel (TrueDepth
+    capture-app intrinsics) or None for the legacy calibration polynomial.
+    The horizontal focal length sets the pixels-per-mm scale.
     """
     if not jaw_points or float_min is None or float_max is None:
         return None
@@ -282,7 +291,9 @@ def compute_neck_arc(
     chin_z_mm = float(np.nanmedian(patch))
     band[band > chin_z_mm + const.NECK_ARC_BACKGROUND_MARGIN_MM] = np.nan
 
-    ppmm = pixels_per_mm_at_distance(chin_z_mm / 10.0)
+    ppmm = pixels_per_mm_at_distance(
+        chin_z_mm / 10.0, focal_px=None if camera is None else camera.fx
+    )
     if ppmm is None or ppmm <= 0:
         return None
 
@@ -360,10 +371,10 @@ def compute_neck_arc(
         if not np.isfinite(z_mm):
             continue
         z_cm = z_mm / 10.0
-        x_mm = pixel_to_mm(px, z_cm, photo_width)
-        y_mm = pixel_to_mm(py, z_cm, photo_height)
-        if x_mm is None or y_mm is None:
+        point_mm = point_to_mm(px, py, z_cm, photo_width, photo_height, camera)
+        if point_mm is None:
             continue
+        x_mm, y_mm = point_mm
         arc_points_photo.append((px, py))
         arc_points_3d.append((x_mm, y_mm, z_mm))
     if len(arc_points_3d) < 2:

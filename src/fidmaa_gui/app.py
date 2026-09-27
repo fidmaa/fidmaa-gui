@@ -56,6 +56,7 @@ from PySide6.QtWidgets import (
 
 from . import const, errors
 from .calculations import findPoint, lower_jaw_x_bounds, neck_to_jaw_width_ratio
+from .depth_source import combine_warnings, depth_source_status, portrait_camera
 from .depth_visualization import (
     DepthDisplayMode,
     boost_matte,
@@ -1008,6 +1009,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
             image_size=self.image.size,
             depth_to_cm=self.get_depthmap_distance,
             pixels_per_mm=pixels_per_mm_at_distance,
+            camera=portrait_camera(self),
             surface_length=lambda start, end: self.surface_vector_filtered(
                 start[0], start[1], end[0], end[1], 3
             ),
@@ -2439,7 +2441,9 @@ class MainWindow(UILoaderMixin, QMainWindow):
         x, y = self.display_to_depthmap_coordinates(x, y)
         x = int(clamp(x, 0, self.depthmap.size[0] - 1))
         y = int(clamp(y, 0, self.depthmap.size[1] - 1))
-        return self.depthmap.getpixel((x, y))[0]
+        value = self.depthmap.getpixel((x, y))
+        # Legacy Camera-app depth maps are RGB; capture-app ones are 8-bit "L".
+        return value[0] if isinstance(value, tuple) else value
 
     def distance_for_click(self, x, y):
         return self.get_depthmap_distance(self.get_depthmap_value(x, y))
@@ -2454,9 +2458,29 @@ class MainWindow(UILoaderMixin, QMainWindow):
         image_x = x * self.image.size[0] / const.MAIN_IMAGE_WIDTH
         image_y = y * self.image.size[1] / const.MAIN_IMAGE_HEIGHT
 
+        camera = portrait_camera(self)
+        if camera is None:
+            # Legacy Camera-app photo: calibration polynomial, image centre.
+            return (
+                pixel_to_mm(image_x, distance_cm, self.image.size[0]),
+                pixel_to_mm(image_y, distance_cm, self.image.size[1]),
+            )
+        # TrueDepth capture-app photo: pinhole model with the file intrinsics.
         return (
-            pixel_to_mm(image_x, distance_cm, self.image.size[0]),
-            pixel_to_mm(image_y, distance_cm, self.image.size[1]),
+            pixel_to_mm(
+                image_x,
+                distance_cm,
+                self.image.size[0],
+                focal_px=camera.fx,
+                principal_px=camera.cx,
+            ),
+            pixel_to_mm(
+                image_y,
+                distance_cm,
+                self.image.size[1],
+                focal_px=camera.fy,
+                principal_px=camera.cy,
+            ),
         )
 
     def click_to_3d(self, x, y):
@@ -2539,6 +2563,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
             photo_height,
             self.float_min_value,
             self.float_max_value,
+            camera=portrait_camera(self),
         )
 
     def vector_length_simple(self, x1, y1, z1, x2, y2, z2):
@@ -2635,8 +2660,11 @@ class MainWindow(UILoaderMixin, QMainWindow):
             )
             return
 
-        except NoDepthMapFound:
-            self.critical_error(errors.NO_DEPTH_DATA_ERROR)
+        except NoDepthMapFound as e:
+            # Also raised for TrueDepth capture-app files when the macOS depth
+            # reader is unavailable (e.g. on Linux/Windows); the library's
+            # message says which case it is, so show it with the generic hint.
+            self.critical_error(errors.no_depth_data_error(e))
             return
 
         except UnknownExtension as e:
@@ -2711,6 +2739,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
                             hairmap=self.portrait.hairmap,
                             float_min=self.float_min_value,
                             float_max=self.float_max_value,
+                            camera=portrait_camera(self),
                         )
                     )
 
@@ -2872,6 +2901,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 circumference_multiplier=3.0,
                 n_samples=7,
                 hairmap=self.portrait.hairmap,
+                camera=portrait_camera(self),
             )
 
         if self.neck_measurement_auto is not None:
@@ -2902,6 +2932,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
                     photo_height=self.image.size[1],
                     float_min=self.portrait.floatValueMin,
                     float_max=self.portrait.floatValueMax,
+                    camera=portrait_camera(self),
                 )
             except (IndexError, ValueError) as e:
                 print(f"compute_neck_arc failed: {type(e).__name__}: {e}")
@@ -2936,6 +2967,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 photo_h=self.image.size[1],
                 float_min=self.portrait.floatValueMin,
                 float_max=self.portrait.floatValueMax,
+                camera=portrait_camera(self),
             )
             if self.mouth_measurement is None or self.mouth_measurement.distance_3d_mm is None:
                 print("FaceMesh mouth measurement: depth conversion failed")
@@ -2947,10 +2979,14 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 ["Open a photo to run the automatic analysis."], None
             )
             return
+        depth_line, depth_warning = depth_source_status(self.portrait)
         if pose is None:
             self.measurementPanel.set_automatic_results(
-                ["Pose: not detected"],
-                "Face not detected. Try Analysis → Force extended neck analysis.",
+                ["Pose: not detected", depth_line],
+                combine_warnings(
+                    "Face not detected. Try Analysis → Force extended neck analysis.",
+                    depth_warning,
+                ),
             )
             return
 
@@ -3001,7 +3037,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
             if sd is not None and sd.neck_width_front_arc_mm:
                 lines.append(f"Neck width (3D front arc): {format_cm(sd.neck_width_front_arc_mm)}")
                 lines.append(f"Neck width (3D straight): {format_cm(sd.neck_width_straight_mm)}")
-        self.measurementPanel.set_automatic_results(lines, warning)
+        lines.append(depth_line)
+        self.measurementPanel.set_automatic_results(lines, combine_warnings(warning, depth_warning))
 
     def _diagnostics_text(self):
         pose = self.neck_midpoint.pose if self.neck_midpoint else None

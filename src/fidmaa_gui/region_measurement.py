@@ -155,7 +155,14 @@ class RegionMeasurementEngine:
         pixels_per_mm: Callable[[np.ndarray | float], np.ndarray | float | None],
         surface_length: Callable[[tuple[int, int], tuple[int, int]], float | None],
         teethmap: Image.Image | None = None,
+        camera=None,
     ) -> None:
+        """``camera`` is the photo's ``portrait_analyser.CameraModel`` (file
+        intrinsics of TrueDepth capture-app photos). When given, points are
+        converted with the pinhole model and ``pixels_per_mm`` is not used;
+        None keeps the calibration polynomial and the image-centre principal
+        point.
+        """
         self.depth = np.asarray(filtered_depthmap.convert("L"), dtype=np.float64)
         self.display_size = display_size
         self.image_size = image_size
@@ -163,6 +170,7 @@ class RegionMeasurementEngine:
         self.pixels_per_mm = pixels_per_mm
         self.surface_length = surface_length
         self.teethmap = teethmap
+        self.camera = camera
 
     def measure(
         self,
@@ -367,6 +375,11 @@ class RegionMeasurementEngine:
         image_width, image_height = self.image_size
         image_x = x * image_width / display_width
         image_y = y * image_height / display_height
+        if self.camera is not None:
+            z_mm = z_cm * 10.0
+            x_mm = (image_x - self.camera.cx) * z_mm / self.camera.fx
+            y_mm = (image_y - self.camera.cy) * z_mm / self.camera.fy
+            return x_mm, y_mm, z_mm
         pixels_per_mm = self._pixels_per_mm_array(z_cm)
         with np.errstate(divide="ignore", invalid="ignore"):
             x_mm = (image_x - image_width / 2.0) / pixels_per_mm

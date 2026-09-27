@@ -1,3 +1,5 @@
+import html
+
 from PySide6.QtCore import QObject
 
 tr = QObject.tr
@@ -19,6 +21,25 @@ This application currently supports selfies (photos taken with the front-facing 
 taken on the iPhone in portrait mode.
 </p>"""
 )
+
+
+def no_depth_data_error(exception):
+    """NO_DEPTH_DATA_ERROR plus the library's reason.
+
+    Photos from the TrueDepth capture app store 16-bit depth that can only be
+    decoded by the macOS reader; elsewhere they end up here too, and the
+    library's message is the only thing telling them apart from a photo that
+    really has no depth.
+    """
+    detail = str(exception).strip()
+    if not detail:
+        return NO_DEPTH_DATA_ERROR
+    return (
+        NO_DEPTH_DATA_ERROR
+        + "<p>Photos from the TrueDepth capture app can only be opened on macOS.</p>"
+        + f"<p><small>Details: {html.escape(detail)}</small></p>"
+    )
+
 
 NO_FRONT_CAMERA_NOTIFICATION = tr(
     """<p>
