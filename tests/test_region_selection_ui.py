@@ -362,3 +362,20 @@ def test_zoomed_depthmap_crop_is_centred_on_scaled_point(qapp):
     assert (kw["mouse_x"], kw["mouse_y"]) == (288, 384)
     assert zoomed.getpixel((72, 48))[0] == 200
     window.close()
+
+
+def test_clickable_label_emits_right_click(qapp):
+    label = QClickableLabel()
+    label.resize(100, 100)
+    label.show()
+    right_clicks = []
+    left_clicks = []
+    label.rightClicked.connect(right_clicks.append)
+    label.clicked.connect(left_clicks.append)
+
+    QTest.mouseClick(label, Qt.RightButton, pos=QPointF(12, 34).toPoint())
+
+    assert len(right_clicks) == 1
+    assert (right_clicks[0].x(), right_clicks[0].y()) == (12, 34)
+    assert left_clicks == []
+    label.close()

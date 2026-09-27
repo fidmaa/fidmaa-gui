@@ -10,6 +10,7 @@ class QClickableLabel(QLabel):
     dragged = QtCore.Signal(QPointF)
     released = QtCore.Signal(QPointF)
     pointerMoved = QtCore.Signal(QPointF)
+    rightClicked = QtCore.Signal(QPointF)
 
     def __init__(self, parent=None):
         QLabel.__init__(self, parent=parent)
@@ -36,4 +37,6 @@ class QClickableLabel(QLabel):
                 if movement.manhattanLength() <= 3:
                     self.clicked.emit(event.position())
             self._press_position = None
+        elif event.button() == Qt.RightButton:
+            self.rightClicked.emit(event.position())
         super().mouseReleaseEvent(event)
