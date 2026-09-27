@@ -37,12 +37,15 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
+    QGridLayout,
     QGroupBox,
     QLabel,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSpinBox,
     QSplitter,
@@ -179,12 +182,29 @@ class MainWindow(UILoaderMixin, QMainWindow):
         layout = QVBoxLayout(self.regionOptionsWidget)
         layout.setContentsMargins(0, 0, 0, 0)
 
+        regions_group = QGroupBox("Regions")
+        regions_grid = QGridLayout(regions_group)
+        regions_grid.addWidget(QLabel("Selector"), 0, 1)
+        regions_grid.addWidget(QLabel("Mask"), 0, 2)
         self.regionModeACombo, self.regionMaskACombo = self._create_region_options(
-            layout, "Region A", SelectionMode.LOCAL_PEAK
+            SelectionMode.LOCAL_PEAK
         )
         self.regionModeBCombo, self.regionMaskBCombo = self._create_region_options(
-            layout, "Region B", SelectionMode.LOCAL_VALLEY
+            SelectionMode.LOCAL_VALLEY
         )
+        for row, (name, mode_combo, mask_combo) in enumerate(
+            (
+                ("A", self.regionModeACombo, self.regionMaskACombo),
+                ("B", self.regionModeBCombo, self.regionMaskBCombo),
+            ),
+            start=1,
+        ):
+            regions_grid.addWidget(QLabel(name), row, 0)
+            regions_grid.addWidget(mode_combo, row, 1)
+            regions_grid.addWidget(mask_combo, row, 2)
+        regions_grid.setColumnStretch(1, 2)
+        regions_grid.setColumnStretch(2, 1)
+        layout.addWidget(regions_group)
 
         settings_group = QGroupBox("Sampling")
         settings_form = QFormLayout(settings_group)
@@ -214,14 +234,26 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.regionResultEdit = QPlainTextEdit()
         self.regionResultEdit.setReadOnly(True)
         self.regionResultEdit.setMinimumWidth(270)
+        self.regionResultEdit.setMinimumHeight(120)
         self.regionResultEdit.setPlainText(
             "Click once to place region A, then once to place region B."
         )
         layout.addWidget(self.regionResultEdit, stretch=1)
         self.measurementPanel.optionsLayout.addWidget(self.regionOptionsWidget)
 
+        # Scroll instead of squeezing: the panel's option groups and history
+        # need more height than the window may offer.
+        self.measurementPanelScroll = QScrollArea()
+        self.measurementPanelScroll.setWidget(self.measurementPanel)
+        self.measurementPanelScroll.setWidgetResizable(True)
+        self.measurementPanelScroll.setFrameShape(QFrame.NoFrame)
+        self.measurementPanelScroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.measurementPanelScroll.setMinimumWidth(
+            self.measurementPanel.minimumWidth()
+            + self.measurementPanelScroll.verticalScrollBar().sizeHint().width()
+        )
         column = self.ui.findChild(QVBoxLayout, "verticalLayout")
-        column.insertWidget(column.indexOf(self.ui.dataOutputEdit), self.measurementPanel)
+        column.insertWidget(column.indexOf(self.ui.dataOutputEdit), self.measurementPanelScroll)
 
         for widget in (
             self.regionModeACombo,
@@ -234,9 +266,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.regionVectorCountSpin.valueChanged.connect(self._region_settings_changed)
         self.regionRadiusSpin.valueChanged.connect(self._region_radius_changed)
 
-    def _create_region_options(self, parent_layout, title, default_mode):
-        group = QGroupBox(title)
-        form = QFormLayout(group)
+    def _create_region_options(self, default_mode):
         mode_combo = QComboBox()
         for mode in SelectionMode:
             mode_combo.addItem(mode.value, mode)
@@ -267,9 +297,6 @@ class MainWindow(UILoaderMixin, QMainWindow):
         for region_mask in RegionMask:
             mask_combo.addItem(region_mask.value, region_mask)
         mask_combo.setToolTip("Optionally restrict candidate pixels to the detected teeth mask.")
-        form.addRow("Selector:", mode_combo)
-        form.addRow("Mask:", mask_combo)
-        parent_layout.addWidget(group)
         return mode_combo, mask_combo
 
     def _create_toolbar_and_menus(self):

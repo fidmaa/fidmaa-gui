@@ -605,3 +605,21 @@ def test_face_mesh_is_painted_in_zoom_only_in_everywhere_mode(qapp):
     # drawn at display resolution: a fixed-size dot, not an enlarged 2x2-pixel blob
     assert canvas.pixelColor(80 + 6, 80).red() < 50
     window.close()
+
+
+def test_region_options_are_not_squeezed_in_a_short_window(qapp):
+    window = MainWindow()
+    window.resize(1500, 700)
+    window.show()
+    window.set_tool(MeasurementTool.REGION)
+    qapp.processEvents()
+
+    for widget in (
+        window.regionModeACombo,
+        window.regionMaskBCombo,
+        window.regionRadiusSpin,
+        window.regionVectorCountSpin,
+    ):
+        assert widget.height() >= widget.minimumSizeHint().height()
+    assert window.regionResultEdit.height() >= 120
+    window.close()
