@@ -60,11 +60,12 @@ from .depth_visualization import (
     render_depth_contour_overlay,
     render_depth_visualization,
 )
-from .measurement_panel import MeasurementPanel
+from .measurement_panel import MeasurementPanel, format_cm
 from .measurement_tools import (
     HistoryEntry,
     MeasurementTool,
     PolylineEditor,
+    measure_polyline,
 )
 from .neck_arc import compute_neck_arc
 from .region_measurement import (
@@ -410,13 +411,53 @@ class MainWindow(UILoaderMixin, QMainWindow):
         else:
             self.measurementPanel.replace_history(self._tool_history_index, entry)
 
+    def _measure_current_polyline(self):
+        points = self.polyline_editor.points
+        if self.depthmap is None or not hasattr(self, "image") or len(points) < 2:
+            return None
+        step = self.surfaceStepSpin.value()
+        return measure_polyline(
+            points,
+            linear_mm=lambda a, b: self.vector_length_between_two_clicks(a[0], a[1], b[0], b[1]),
+            surface_mm=lambda a, b: self.surface_vector_filtered(a[0], a[1], b[0], b[1], step),
+        )
+
     def _update_tool_result(self, *args):
         if self.current_tool == MeasurementTool.REGION:
             self._show_region_tool_result()
             return
+        hint = self.TOOL_HINTS[self.current_tool]
+        if self.depthmap is None:
+            hint = "Open a photo with depth data first. " + hint
+        result = self._measure_current_polyline()
+        if result is None or not result.segments:
+            self.measurementPanel.set_tool_result(self.current_tool.value, None, None, [], hint)
+            return
+
+        details = []
+        if self.current_tool == MeasurementTool.VECTOR:
+            (ax, ay), (bx, by) = self.polyline_editor.points[:2]
+            depth_a_mm = self.get_depthmap_distance(self.get_depthmap_value(ax, ay)) * 10
+            depth_b_mm = self.get_depthmap_distance(self.get_depthmap_value(bx, by)) * 10
+            details.append(f"Δ depth: {depth_b_mm - depth_a_mm:+.1f} mm")
+        else:
+            state = "finished" if self.polyline_editor.finished else "in progress"
+            details.append(f"{len(result.segments)} segments ({state})")
+            for number, segment in enumerate(result.segments, start=1):
+                details.append(
+                    f"  {number}. {format_cm(segment.linear_mm)} / {format_cm(segment.surface_mm)}"
+                )
+        details.append(f"Surface step: {self.surfaceStepSpin.value()} px (median filtered)")
         self.measurementPanel.set_tool_result(
-            self.current_tool.value, None, None, [], self.TOOL_HINTS[self.current_tool]
+            self.current_tool.value, result.linear_mm, result.surface_mm, details, hint
         )
+        if self.polyline_editor.finished:
+            self._record_history(
+                self.current_tool,
+                len(self.polyline_editor.points),
+                result.linear_mm,
+                result.surface_mm,
+            )
 
     def _show_region_tool_result(self):
         result = self.region_measurement_result
@@ -442,6 +483,69 @@ class MainWindow(UILoaderMixin, QMainWindow):
             return
         self._show_region_tool_result()
 
+    POINT_GRAB_TOLERANCE = 6
+
+    @staticmethod
+    def _clamped_display_point(point):
+        return (
+            float(clamp(point.x(), 0, const.MAIN_IMAGE_WIDTH)),
+            float(clamp(point.y(), 0, const.MAIN_IMAGE_HEIGHT)),
+        )
+
+    def _on_image_clicked(self, point, *args):
+        if self.current_tool == MeasurementTool.REGION:
+            return
+        if self._suppress_next_click:
+            self._suppress_next_click = False
+            return
+        x, y = self._clamped_display_point(point)
+        if self.polyline_editor.add_point((x, y)):
+            self._tool_history_index = None
+        self.ui.xValue.setValue(int(x))
+        self.ui.yValue.setValue(int(y))
+        self._update_tool_result()
+        self._redraw_tool_overlay()
+
+    def _on_image_right_clicked(self, point, *args):
+        self._finish_polyline()
+
+    def _finish_polyline(self):
+        if self.current_tool != MeasurementTool.POLYLINE:
+            return
+        if self.polyline_editor.finished or not self.polyline_editor.finish():
+            return
+        self._update_tool_result()
+        self._redraw_tool_overlay()
+
+    def _begin_point_drag(self, point, *args):
+        if self.current_tool == MeasurementTool.REGION:
+            return
+        index = self.polyline_editor.point_near(
+            self._clamped_display_point(point), self.POINT_GRAB_TOLERANCE
+        )
+        self._point_drag_index = index
+        # A press on an existing point is a drag; the click emitted on release
+        # (when the pointer moved <= 3 px) must not add a new point.
+        self._suppress_next_click = index is not None
+
+    def _drag_point(self, point, *args):
+        if self._point_drag_index is None:
+            return
+        self.polyline_editor.move_point(self._point_drag_index, self._clamped_display_point(point))
+        self._update_tool_result()
+        self._redraw_tool_overlay()
+
+    def _finish_point_drag(self, point, *args):
+        if self._point_drag_index is None:
+            return
+        self._drag_point(point)
+        self._point_drag_index = None
+
+    def _redraw_tool_overlay(self):
+        if self.portrait:
+            self.redrawImage(force=True)
+        self.redrawZoom()
+
     def keyPressEvent(self, event):
         """Keep the single-key measurement tools reliable across Qt platforms."""
         if event.modifiers() in (Qt.NoModifier, Qt.KeypadModifier):
@@ -464,6 +568,22 @@ class MainWindow(UILoaderMixin, QMainWindow):
             mode = mode_by_key.get(event.key())
             if mode is not None:
                 self.regionToolActions[mode].trigger()
+                event.accept()
+                return
+
+        if self.current_tool != MeasurementTool.REGION:
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                self._finish_polyline()
+                event.accept()
+                return
+            if event.key() in (Qt.Key_Backspace, Qt.Key_Escape):
+                if event.key() == Qt.Key_Backspace:
+                    self.polyline_editor.undo()
+                else:
+                    self.polyline_editor.clear()
+                    self._tool_history_index = None
+                self._update_tool_result()
+                self._redraw_tool_overlay()
                 event.accept()
                 return
 
@@ -846,6 +966,28 @@ class MainWindow(UILoaderMixin, QMainWindow):
         finally:
             painter.restore()
 
+    POLYLINE_COLOR = QColor(255, 220, 0, 230)
+
+    def _paint_polyline_overlay(self, painter, point_mapper):
+        points = self.polyline_editor.points
+        if self.current_tool == MeasurementTool.REGION or not points:
+            return
+        painter.save()
+        try:
+            mapped = [point_mapper(point) for point in points]
+            painter.setPen(QtGui.QPen(self.POLYLINE_COLOR, 2))
+            painter.setBrush(Qt.NoBrush)
+            for start, end in zip(mapped, mapped[1:], strict=False):
+                painter.drawLine(start, end)
+            for number, point in enumerate(mapped, start=1):
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(self.POLYLINE_COLOR)
+                painter.drawEllipse(point, 4, 4)
+                painter.setPen(self.POLYLINE_COLOR)
+                painter.drawText(point + QPoint(6, -6), str(number))
+        finally:
+            painter.restore()
+
     def _create_zoom_panel(self):
         # Take the UI widget out of central and wrap it with a zoom panel below
         ui_widget = self.centralWidget()
@@ -931,7 +1073,10 @@ class MainWindow(UILoaderMixin, QMainWindow):
             and self.portrait is not None
             and self.portrait.skinmap is not None
         )
-        if not show_regions and not show_neck:
+        show_polyline = self.current_tool != MeasurementTool.REGION and bool(
+            self.polyline_editor.points
+        )
+        if not show_regions and not show_neck and not show_polyline:
             return
 
         def display_point(point):
@@ -996,6 +1141,9 @@ class MainWindow(UILoaderMixin, QMainWindow):
                     return display_point(main_point)
 
                 self._paint_neck_depth_overlay(painter, neck_display_point)
+
+            if show_polyline:
+                self._paint_polyline_overlay(painter, display_point)
         finally:
             painter.restore()
 
@@ -2010,6 +2158,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 painter.setBrush(Qt.NoBrush)
 
             self._paint_region_overlay(painter)
+            self._paint_polyline_overlay(painter, lambda p: QPoint(round(p[0]), round(p[1])))
             painter.setPen(QColor(0, 0, 255, 127))
 
             # Calculate 2 points at the edge of the image, using the angle.
@@ -2918,13 +3067,6 @@ class MainWindow(UILoaderMixin, QMainWindow):
             settings.setValue(const.LAST_DIRECTORY_USED, os.path.dirname(fileName))
             self._loadImage(fileName)
 
-    def setMidlinePoint(self, point, *args, **kw):
-        if self._region_target is not None:
-            return
-        self.ui.xValue.setValue(point.x())
-        self.ui.yValue.setValue(point.y())
-        self.redrawImage()
-
     def setMidlineY(self, point, *args, **kw):
         # self.ui.xValue.setValue(point.x())
         self.ui.yValue.setValue(point.y())
@@ -2965,7 +3107,11 @@ class MainWindow(UILoaderMixin, QMainWindow):
 
         self.ui.loadJPEGButton.clicked.connect(self.loadJPEG)
         self.ui.open3DViewButton.clicked.connect(self.open3DView)
-        self.ui.imageLabel.clicked.connect(self.setMidlinePoint)
+        self.ui.imageLabel.clicked.connect(self._on_image_clicked)
+        self.ui.imageLabel.rightClicked.connect(self._on_image_right_clicked)
+        self.ui.imageLabel.pressed.connect(self._begin_point_drag)
+        self.ui.imageLabel.dragged.connect(self._drag_point)
+        self.ui.imageLabel.released.connect(self._finish_point_drag)
         self.ui.imageLabel.setMouseTracking(True)
         self.ui.imageLabel.pointerMoved.connect(self.redrawZoom)
         self.ui.imageLabel.pointerMoved.connect(self._update_region_cursor)
