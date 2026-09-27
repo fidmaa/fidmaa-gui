@@ -148,7 +148,7 @@ class RegionMeasurementEngine:
     def __init__(
         self,
         *,
-        filtered_depthmap: Image.Image,
+        filtered_depthmap,
         display_size: tuple[int, int],
         image_size: tuple[int, int],
         depth_to_cm: Callable[[np.ndarray | float], np.ndarray | float],
@@ -162,8 +162,19 @@ class RegionMeasurementEngine:
         converted with the pinhole model and ``pixels_per_mm`` is not used;
         None keeps the calibration polynomial and the image-centre principal
         point.
+
+        ``filtered_depthmap`` is either the median-filtered 8-bit depth image
+        (raw disparity codes, 0 = invalid, converted with ``depth_to_cm``) or
+        a median-filtered float ``portrait_analyser`` ``DepthMap``
+        (``is_float``), whose centimetres are sampled directly: NaN is
+        invalid and ``depth_to_cm`` is not used.
         """
-        self.depth = np.asarray(filtered_depthmap.convert("L"), dtype=np.float64)
+        if getattr(filtered_depthmap, "is_float", False) is True:
+            self.depth = np.asarray(filtered_depthmap.to_cm_array(), dtype=np.float64)
+            self.depth_is_cm = True
+        else:
+            self.depth = np.asarray(filtered_depthmap.convert("L"), dtype=np.float64)
+            self.depth_is_cm = False
         self.display_size = display_size
         self.image_size = image_size
         self.depth_to_cm = depth_to_cm
@@ -327,6 +338,9 @@ class RegionMeasurementEngine:
 
     def _depth_array_to_cm(self, raw_depth: np.ndarray) -> np.ndarray:
         """Use a vectorized converter when available, with a scalar fallback."""
+        if self.depth_is_cm:
+            # Float depth is already in centimetres (NaN = invalid).
+            return raw_depth
         try:
             converted = np.asarray(self.depth_to_cm(raw_depth), dtype=np.float64)
             if converted.shape == raw_depth.shape:
@@ -353,7 +367,10 @@ class RegionMeasurementEngine:
         display_width, display_height = self.display_size
         depth_x = x_coords * (depth_width - 1) / max(1, display_width - 1)
         depth_y = y_coords * (depth_height - 1) / max(1, display_height - 1)
-        raw_depth = _bilinear_sample_array(self.depth, depth_x, depth_y)
+        if self.depth_is_cm:
+            raw_depth = _bilinear_sample_float_array(self.depth, depth_x, depth_y)
+        else:
+            raw_depth = _bilinear_sample_array(self.depth, depth_x, depth_y)
         return x_coords, y_coords, raw_depth
 
     def _sample_teeth_mask(self, x_coords: np.ndarray, y_coords: np.ndarray) -> np.ndarray:
@@ -477,6 +494,43 @@ def _bilinear_sample_array(image: np.ndarray, x: np.ndarray, y: np.ndarray) -> n
     for value, weight in zip(values, weights, strict=True):
         result += value * weight
         invalid |= (weight > 0) & (value == 0)
+    result[invalid] = np.nan
+    return result
+
+
+def _bilinear_sample_float_array(image: np.ndarray, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Bilinear sampling of a float map; NaN wherever a contributing pixel is NaN.
+
+    Same weights as :func:`_bilinear_sample_array`, but holes are NaN (not
+    0) and a zero-weight hole does not poison the result (``0 * NaN``).
+    """
+    height, width = image.shape
+    x = np.clip(x.astype(np.float64), 0, width - 1)
+    y = np.clip(y.astype(np.float64), 0, height - 1)
+    x0 = np.floor(x).astype(np.int32)
+    y0 = np.floor(y).astype(np.int32)
+    x1 = np.minimum(x0 + 1, width - 1)
+    y1 = np.minimum(y0 + 1, height - 1)
+    fraction_x = x - x0
+    fraction_y = y - y0
+    weights = (
+        (1 - fraction_x) * (1 - fraction_y),
+        fraction_x * (1 - fraction_y),
+        (1 - fraction_x) * fraction_y,
+        fraction_x * fraction_y,
+    )
+    values = (
+        image[y0, x0],
+        image[y0, x1],
+        image[y1, x0],
+        image[y1, x1],
+    )
+    result = np.zeros_like(x, dtype=np.float64)
+    invalid = np.zeros_like(x, dtype=bool)
+    for value, weight in zip(values, weights, strict=True):
+        finite = np.isfinite(value)
+        result += np.where(finite, value, 0.0) * weight
+        invalid |= (weight > 0) & ~finite
     result[invalid] = np.nan
     return result
 

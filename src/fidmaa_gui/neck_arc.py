@@ -25,7 +25,9 @@ The measurement follows the anatomy rather than the skin matte:
 
 Raw depth values are inverse to physical distance: a HIGHER raw value means
 CLOSER to the camera.  Everything below works in millimetres instead, via
-the EXIF calibration, so the geometry is in real units.
+the EXIF calibration, so the geometry is in real units.  Capture-app photos
+pass their median-filtered float ``DepthMap`` (``depth=``); its millimetres
+are read directly, without the 8-bit encoding.
 """
 
 from dataclasses import dataclass, field
@@ -117,6 +119,8 @@ def depth_band_mm(
     y_end,
     background_cutoff_mm=None,
     zero_is_invalid=False,
+    *,
+    depth=None,
 ):
     """Distance-from-camera in mm for photo rows [y_start, y_end).
 
@@ -132,6 +136,18 @@ def depth_band_mm(
     y_end = min(int(photo_height), int(y_end))
     if y_end - y_start < 4:
         return None
+
+    if depth is not None and getattr(depth, "is_float", False) is True:
+        z_mm = _float_band_mm(depth, photo_width, photo_height, y_start, y_end)
+        if background_cutoff_mm is not None:
+            z_mm[z_mm > background_cutoff_mm] = np.nan
+        return z_mm
+    if depth is not None:
+        # Legacy DepthMap: exactly the historical 8-bit path below.
+        filtered_depthmap = depth.image
+        float_min = depth.float_min
+        float_max = depth.float_max
+        zero_is_invalid = depth.zero_is_invalid
 
     full = filtered_depthmap.resize((photo_width, photo_height), resample=Image.Resampling.BILINEAR)
     raw = np.asarray(full, dtype=np.float64)[y_start:y_end]
@@ -149,6 +165,41 @@ def depth_band_mm(
     if background_cutoff_mm is not None:
         z_mm[z_mm > background_cutoff_mm] = np.nan
     return z_mm
+
+
+def _float_band_mm(depth, photo_width, photo_height, y_start, y_end):
+    """Photo rows [y_start, y_end) of a float ``DepthMap`` in mm, bilinear.
+
+    Uses the library's endpoint-matching photo -> depth mapping (like
+    ``DepthMap.bilinear_cm``); a photo pixel whose four depth neighbours
+    include a hole (NaN) is NaN, so holes never blend into their neighbours.
+    """
+    cm = np.asarray(depth.to_cm_array(), dtype=np.float64)
+    rows, cols = cm.shape
+    xs = np.arange(photo_width, dtype=np.float64)
+    ys = np.arange(y_start, y_end, dtype=np.float64)
+    depth_x = xs * (cols - 1) / max(1, photo_width - 1)
+    depth_y = ys * (rows - 1) / max(1, photo_height - 1)
+    x0 = np.floor(depth_x).astype(np.int64)
+    y0 = np.floor(depth_y).astype(np.int64)
+    x1 = np.minimum(x0 + 1, cols - 1)
+    y1 = np.minimum(y0 + 1, rows - 1)
+    fx = (depth_x - x0)[np.newaxis, :]
+    fy = (depth_y - y0)[:, np.newaxis]
+    result = np.zeros((ys.size, xs.size), dtype=np.float64)
+    invalid = np.zeros(result.shape, dtype=bool)
+    for rows_index, cols_index, weight in (
+        (y0, x0, (1.0 - fx) * (1.0 - fy)),
+        (y0, x1, fx * (1.0 - fy)),
+        (y1, x0, (1.0 - fx) * fy),
+        (y1, x1, fx * fy),
+    ):
+        values = cm[rows_index[:, np.newaxis], cols_index[np.newaxis, :]]
+        finite = np.isfinite(values)
+        result += np.where(finite, values, 0.0) * weight
+        invalid |= (weight > 0) & ~finite
+    result[invalid] = np.nan
+    return result * 10.0
 
 
 def find_stabilisation_index(profile_mm, first_derivative_weights, ppmm, fraction):
@@ -245,6 +296,7 @@ def compute_neck_arc(
     n_samples=None,
     camera=None,
     zero_is_invalid=False,
+    depth=None,
 ):
     """Measure the neck along a curve parallel to the lower face oval.
 
@@ -256,9 +308,18 @@ def compute_neck_arc(
     capture-app intrinsics) or None for the legacy calibration polynomial.
     The horizontal focal length sets the pixels-per-mm scale.
     `zero_is_invalid`: raw code 0 means "no depth" (capture-app maps).
+    `depth`: optional median-filtered portrait_analyser ``DepthMap``
+    (``portrait.depth.median_filtered()``); when given it replaces
+    `filtered_depthmap`, `float_min`, `float_max` and `zero_is_invalid`, and
+    float maps are read at full precision.
     """
-    if not jaw_points or float_min is None or float_max is None:
+    if not jaw_points:
         return None
+    if depth is None and (float_min is None or float_max is None):
+        return None
+    if depth is not None and not getattr(depth, "is_float", False):
+        if depth.float_min is None or depth.float_max is None:
+            return None
     n_samples = n_samples or const.NECK_ARC_SAMPLE_COUNT
 
     jaw = sorted(((float(x), float(y)) for x, y in jaw_points), key=lambda p: p[0])
@@ -290,6 +351,7 @@ def compute_neck_arc(
         band_start,
         band_end,
         zero_is_invalid=zero_is_invalid,
+        depth=depth,
     )
     if band is None:
         return None

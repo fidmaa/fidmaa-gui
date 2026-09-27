@@ -63,6 +63,7 @@ from .depth_source import (
     depth_is_implausible,
     depth_source_status,
     depth_zero_is_invalid,
+    float_depth,
     portrait_camera,
 )
 from .depth_visualization import (
@@ -108,6 +109,30 @@ def _show_3d_view(image, depthmap, float_min, float_max):
     pyvista_show(image, depthmap, float_min, float_max)
 
 
+def window_float_depth(window):
+    """Float ``DepthMap`` of the window's photo (capture-app files), or None.
+
+    Module-level (not only a method) so the measurement helpers also work on
+    the lightweight stand-in windows used by unit tests.
+    """
+    return float_depth(getattr(window, "portrait", None))
+
+
+def window_filtered_float_depth(window):
+    """Median-filtered float ``DepthMap`` of the window's photo, or None.
+
+    Cached on the window per source map, like ``filtered_depthmap``.
+    """
+    depth = window_float_depth(window)
+    if depth is None:
+        return None
+    cached = getattr(window, "_filtered_float_depth_cache", None)
+    if cached is None or cached[0] is not depth:
+        cached = (depth, depth.median_filtered())
+        window._filtered_float_depth_cache = cached
+    return cached[1]
+
+
 class MainWindow(UILoaderMixin, QMainWindow):
     uifile_name = "form.ui"
 
@@ -142,6 +167,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.portrait: IOSPortrait = None
         self.depthmap = None
         self.filtered_depthmap = None
+        # (source DepthMap, its median-filtered variant) for float depth.
+        self._filtered_float_depth_cache = None
         self.teethmap = None
         self.neck_measurement_auto = None
         self.neck_search_bounds = None
@@ -615,8 +642,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 # makes the whole vector meaningless, not just its 3D length.
                 details.append("Δ depth: n/a")
             else:
-                depth_a_cm = self.get_depthmap_distance(self.get_depthmap_value(ax, ay))
-                depth_b_cm = self.get_depthmap_distance(self.get_depthmap_value(bx, by))
+                depth_a_cm = self.distance_for_click(ax, ay)
+                depth_b_cm = self.distance_for_click(bx, by)
                 details.append(f"Depth A: {depth_a_cm:.1f} cm · B: {depth_b_cm:.1f} cm")
                 details.append(f"Δ depth: {(depth_b_cm - depth_a_cm) * 10:+.1f} mm")
                 # Length ignoring the depth difference: each point projected at
@@ -1041,8 +1068,13 @@ class MainWindow(UILoaderMixin, QMainWindow):
         mode_b = SelectionMode(self.regionModeBCombo.currentText())
         mask_a = RegionMask(self.regionMaskACombo.currentText())
         mask_b = RegionMask(self.regionMaskBCombo.currentText())
+        # Float (capture-app) depth: the engine samples the median-filtered
+        # float map in centimetres; legacy photos keep the 8-bit codes.
+        filtered_float = self._filtered_float_depth()
         engine = RegionMeasurementEngine(
-            filtered_depthmap=self.filtered_depthmap,
+            filtered_depthmap=(
+                filtered_float if filtered_float is not None else self.filtered_depthmap
+            ),
             display_size=(const.MAIN_IMAGE_WIDTH, const.MAIN_IMAGE_HEIGHT),
             image_size=self.image.size,
             depth_to_cm=self.get_depthmap_distance,
@@ -1491,9 +1523,13 @@ class MainWindow(UILoaderMixin, QMainWindow):
         source_size=None,
         crop_box=None,
         display_map=None,
+        value_text=None,
     ):
         """Paint a zoomed map; ``display_map`` (if given) is drawn instead of
-        ``image_map`` while the value readout still uses the raw ``image_map``."""
+        ``image_map`` while the value readout still uses the raw ``image_map``.
+
+        ``value_text`` replaces the "raw <code>" readout (float depth shows the
+        distance in cm; its 8-bit display codes mean nothing)."""
         w = ui_element.width()
         h = ui_element.height()
         if w < 1 or h < 1:
@@ -1553,7 +1589,10 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 text_color = QColor(255, 90, 90, 255)
             else:
                 text_color = QColor(90, 255, 90, 255)
-            lines = [f"{label_text} · raw {value}"]
+            if value_text is not None:
+                lines = [f"{label_text} · {value_text}"]
+            else:
+                lines = [f"{label_text} · raw {value}"]
             details = []
             if raw_range is not None and raw_range[0] is not None:
                 details.append(f"range {raw_range[0]}–{raw_range[1]}")
@@ -1582,7 +1621,15 @@ class MainWindow(UILoaderMixin, QMainWindow):
             depth_visualization=True,
             source_size=source_size,
             crop_box=crop_box,
+            value_text=self._zoom_depth_value_text(mouse_x, mouse_y),
         )
+
+    def _zoom_depth_value_text(self, depth_x, depth_y):
+        """cm readout for float depth at the zoom centre (native depth
+        pixels), None for legacy photos (raw code readout)."""
+        if depth_x is None or depth_y is None:
+            return None
+        return self.depth_readout_at_native(depth_x, depth_y)
 
     def paintZoomedImage(self, zoomed, source_size=None, crop_box=None):
         w = self.zoomedImageLabel.width()
@@ -1674,11 +1721,13 @@ class MainWindow(UILoaderMixin, QMainWindow):
         """Build hairless depth map (depth with hair zeroed out) as a PIL Image."""
         from PIL import Image as PILImage
 
-        if not self.portrait or self.portrait.depthmap is None:
+        if not self.portrait or self.depthmap is None:
             self.hairless_depth_image = None
             return
 
-        depth_arr = np.array(self.portrait.depthmap)
+        # Display image (portrait.depth.to_display_image()), so repaired
+        # capture-app depth shows correctly.
+        depth_arr = np.array(self.depthmap)
         if depth_arr.ndim == 3:
             depth_arr = depth_arr[:, :, 0]
         depth_arr = depth_arr.copy()
@@ -1768,6 +1817,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
             depth_visualization=True,
             source_size=source_size,
             crop_box=crop_box,
+            value_text=self._zoom_depth_value_text(mouse_x, mouse_y),
         )
 
     def _teeth_display_high(self):
@@ -2497,8 +2547,55 @@ class MainWindow(UILoaderMixin, QMainWindow):
         # Legacy Camera-app depth maps are RGB; capture-app ones are 8-bit "L".
         return value[0] if isinstance(value, tuple) else value
 
+    def _float_depth(self):
+        """The photo's float ``DepthMap`` (capture-app files), or None (legacy)."""
+        return window_float_depth(self)
+
+    def _filtered_float_depth(self):
+        """Median-filtered float ``DepthMap`` (cached per source map), or None."""
+        return window_filtered_float_depth(self)
+
+    def display_to_photo_coordinates(self, x, y):
+        """480x640 display point -> full-resolution photo point (per axis),
+        clamped to the photo."""
+        photo_width, photo_height = self.image.size
+        photo_x = x * photo_width / const.MAIN_IMAGE_WIDTH
+        photo_y = y * photo_height / const.MAIN_IMAGE_HEIGHT
+        return (
+            min(max(photo_x, 0.0), photo_width - 1),
+            min(max(photo_y, 0.0), photo_height - 1),
+        )
+
     def distance_for_click(self, x, y):
-        return self.get_depthmap_distance(self.get_depthmap_value(x, y))
+        """Camera distance (cm) at a display-space point, or None if invalid.
+
+        Float (capture-app) depth is read at full precision from
+        ``portrait.depth`` (the single nearest depth pixel, NaN = None).
+        Legacy 8-bit photos keep the historical nearest-pixel read and
+        conversion, so their values are unchanged.
+        """
+        depth = self._float_depth()
+        if depth is None:
+            return self.get_depthmap_distance(self.get_depthmap_value(x, y))
+        if depth_is_implausible(getattr(self, "portrait", None)):
+            return None
+        return depth.distance_cm(*self.display_to_photo_coordinates(x, y), radius=0)
+
+    def depth_readout_at_native(self, depth_x, depth_y):
+        """Zoom-view readout for float depth at a native depth pixel, or None
+        for legacy photos (they show the raw 8-bit code instead)."""
+        depth = self._float_depth()
+        if depth is None:
+            return None
+        rows, cols = depth.shape
+        if not (0 <= depth_y < rows and 0 <= depth_x < cols):
+            return "n/a"
+        cached = getattr(self, "_float_cm_cache", None)
+        if cached is None or cached[0] is not depth:
+            cached = (depth, depth.to_cm_array())
+            self._float_cm_cache = cached
+        value = cached[1][int(depth_y), int(depth_x)]
+        return "n/a" if not np.isfinite(value) else f"{value:.1f} cm"
 
     def translate_click_to_mm(self, distance_cm, x, y):
         """Translate a display-space click to camera-centred X/Y millimetres.
@@ -2595,7 +2692,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
         if depth_is_implausible(getattr(self, "portrait", None)):
             return None
 
-        if self.filtered_depthmap is None:
+        filtered_float = window_filtered_float_depth(self)
+        if filtered_float is None and self.filtered_depthmap is None:
             self.filtered_depthmap = median_filter_depthmap(self.depthmap, size=3)
 
         photo_width, photo_height = self.image.size
@@ -2612,6 +2710,10 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 step,
             )
         ]
+
+        if filtered_float is not None:
+            # Capture-app photo: full-precision float depth, NaN-aware median.
+            return filtered_float.surface_length_mm(points_photo, camera=portrait_camera(self))
 
         return measure_filtered_surface_length(
             self.filtered_depthmap,
@@ -2635,11 +2737,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
         Used by the Vector/Polyline tools and the diagnostics text, which
         show "n/a" for a bad point rather than crash.
         """
-        z1 = self.get_depthmap_value(x1, y1)
-        z2 = self.get_depthmap_value(x2, y2)
-
-        distance_z1 = self.get_depthmap_distance(z1)
-        distance_z2 = self.get_depthmap_distance(z2)
+        distance_z1 = self.distance_for_click(x1, y1)
+        distance_z2 = self.distance_for_click(x2, y2)
         if distance_z1 is None or distance_z2 is None:
             return None
         distance_z1 *= 10  # cm → mm
@@ -2671,7 +2770,10 @@ class MainWindow(UILoaderMixin, QMainWindow):
         try:
             portrait: IOSPortrait = load_image(fileName, use_exif=False)
             image = portrait.photo
-            depthmap = portrait.depthmap
+            # Measurements read portrait.depth (float for capture-app files);
+            # this 8-bit image is for display (and the legacy code path).
+            depth = getattr(portrait, "depth", None)
+            depthmap = depth.to_display_image() if depth is not None else portrait.depthmap
             filtered_depthmap = median_filter_depthmap(depthmap, size=3)
             teethmap = portrait.teethmap
             float_min_value = portrait.floatValueMin
@@ -2711,6 +2813,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.image = image
         self.depthmap = depthmap
         self.filtered_depthmap = filtered_depthmap
+        self._filtered_float_depth_cache = None
+        self._float_cm_cache = None
         self.teethmap = teethmap
         self.float_min_value = float_min_value
         self.float_max_value = float_max_value
@@ -2771,6 +2875,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
                             float_min=self.float_min_value,
                             float_max=self.float_max_value,
                             camera=portrait_camera(self),
+                            **self._library_depth_kwargs(),
                         )
                     )
 
@@ -2936,6 +3041,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 n_samples=7,
                 hairmap=self.portrait.hairmap,
                 camera=portrait_camera(self),
+                **self._library_depth_kwargs(),
             )
 
         if self.neck_measurement_auto is not None:
@@ -2969,6 +3075,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
                     float_max=self.portrait.floatValueMax,
                     camera=portrait_camera(self),
                     zero_is_invalid=depth_zero_is_invalid(self.portrait),
+                    depth=self._filtered_float_depth(),
                 )
             except (IndexError, ValueError) as e:
                 print(f"compute_neck_arc failed: {type(e).__name__}: {e}")
@@ -2983,6 +3090,15 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.ui.dataOutputEdit.setPlainText(self._diagnostics_text())
         self.updateWindowTitle()
         self._update_tool_result()
+
+    def _library_depth_kwargs(self):
+        """``{"depth": portrait.depth}`` for portrait_analyser measurement calls.
+
+        Empty when the portrait has no ``depth`` (older portrait-analyser or
+        test stand-ins), so the positional 8-bit arguments are used as before.
+        """
+        depth = getattr(getattr(self, "portrait", None), "depth", None)
+        return {} if depth is None else {"depth": depth}
 
     def _compute_mouth_measurement(self):
         """FaceMesh mouth opening fallback, only when the user opted in."""
@@ -3007,6 +3123,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 float_max=self.portrait.floatValueMax,
                 camera=portrait_camera(self),
                 zero_is_invalid=getattr(self.portrait, "depth_code_zero_is_invalid", None),
+                **self._library_depth_kwargs(),
             )
             if self.mouth_measurement is None or self.mouth_measurement.distance_3d_mm is None:
                 print("FaceMesh mouth measurement: depth conversion failed")
@@ -3088,6 +3205,12 @@ class MainWindow(UILoaderMixin, QMainWindow):
     def _diagnostics_text(self):
         pose = self.neck_midpoint.pose if self.neck_midpoint else None
         txt = f"*** {pose.value.upper() if pose else 'UNKNOWN'} ***"
+        if self._float_depth() is not None:
+            # Legacy photos keep their diagnostics text unchanged.
+            txt += "\nDepth: full-precision float map (capture app)"
+            repair = getattr(self.portrait, "depth_repaired", None)
+            if repair:
+                txt += f"; repaired: {repair}"
         if pose == PortraitPose.OPEN_MOUTH:
             if self.portrait.teeth_bbox:
                 txt += "\n\nTeeth detected."
@@ -3322,14 +3445,21 @@ class MainWindow(UILoaderMixin, QMainWindow):
             process.join(timeout=2)
 
         new_depthmap = self.depthmap.convert("L")
+        float_min, float_max = self.float_min_value, self.float_max_value
+        depth = self._float_depth()
+        if depth is not None and hasattr(depth, "display_encoding"):
+            # The viewer needs an 8-bit image plus its range: the float map's
+            # display encoding (repaired depth included).
+            display_image, float_min, float_max = depth.display_encoding()
+            new_depthmap = display_image.convert("L")
 
         p = multiprocessing.Process(
             target=_show_3d_view,
             args=(
                 self.image,
                 new_depthmap,
-                self.float_min_value,
-                self.float_max_value,
+                float_min,
+                float_max,
             ),
         )
         p.start()

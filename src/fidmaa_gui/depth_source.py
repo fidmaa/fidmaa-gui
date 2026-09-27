@@ -13,12 +13,21 @@ Capture-app depth maps also differ in two ways the GUI must respect:
   (e.g. inverted: face at ~3 m, background at ~0.6 m, or not alignable with
   the photo). Nothing is measured on such photos.
 
+Since portrait-analyser 0.8, ``IOSPortrait.depth`` is a ``DepthMap``: a
+``LegacyDepthMap`` (8-bit Camera-app disparity, sampled exactly as before) or a
+``FloatDepthMap`` (capture-app depth in metres, NaN = no depth). Capture-app
+photos are measured on the float map; their 8-bit ``depthmap`` is display
+only. ``IOSPortrait.depth_repaired`` names a repair the library applied (e.g.
+depth stored as disparity, i.e. inverted); such photos are measured, with a
+visible warning.
+
 All helpers take duck-typed objects (``getattr`` with defaults) so they work
 with the lightweight stand-ins used by the unit tests.
 """
 
 import dataclasses
 import logging
+import re
 
 from portrait_analyser import check_depth_plausibility
 
@@ -81,6 +90,31 @@ def camera_for_size(camera, size):
     )
 
 
+def float_depth(portrait):
+    """``portrait.depth`` when it is full-precision float depth, else None.
+
+    None for legacy (8-bit Camera-app) photos, for portraits without depth
+    and for portrait-analyser versions without ``IOSPortrait.depth``; callers
+    then keep the historical 8-bit code path unchanged.
+    """
+    depth = getattr(portrait, "depth", None) if portrait is not None else None
+    if depth is not None and getattr(depth, "is_float", False) is True:
+        return depth
+    return None
+
+
+def depth_repair_description(portrait):
+    """Short description of the library's depth repair, or None.
+
+    ``"reciprocal (depth stored as disparity)"`` -> ``"depth stored as disparity"``.
+    """
+    repaired = getattr(portrait, "depth_repaired", None) if portrait is not None else None
+    if not repaired:
+        return None
+    match = re.search(r"\((.+)\)", str(repaired))
+    return match.group(1) if match else str(repaired)
+
+
 def depth_is_implausible(portrait):
     """True only when the library positively flagged the depth as implausible."""
     return getattr(portrait, "depth_plausible", None) is False
@@ -113,13 +147,22 @@ def implausible_depth_warning(portrait):
 def depth_source_status(portrait):
     """Return ``(line, warning)`` describing the depth source of ``portrait``.
 
-    ``warning`` is None unless the depth is relative or implausible.
+    ``warning`` is None unless the depth is relative, implausible or was
+    repaired by the library (measurements stay enabled for repaired depth).
     """
     accuracy = getattr(portrait, "depth_accuracy", None) if portrait is not None else None
     if depth_is_implausible(portrait):
         return (
             f"Depth: implausible ({accuracy or 'unknown accuracy'}, not measured)",
             implausible_depth_warning(portrait),
+        )
+    repair = depth_repair_description(portrait)
+    if repair is not None:
+        source = "TrueDepth absolute" if accuracy == "absolute" else (accuracy or "unknown")
+        return (
+            f"Depth: {source} (repaired: {repair})",
+            f"Depth map was repaired ({repair}) — measurements use the repaired depth; "
+            "double-check them.",
         )
     if accuracy == "absolute":
         if getattr(portrait, "camera", None) is not None:
