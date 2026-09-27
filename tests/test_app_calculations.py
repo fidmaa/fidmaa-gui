@@ -12,6 +12,9 @@ import math
 import pytest
 from portrait_analyser.incisor import pixels_per_mm_at_distance
 
+from fidmaa_gui import const
+from fidmaa_gui.calculations import lower_jaw_x_bounds, neck_to_jaw_width_ratio
+
 
 def vector_length_simple(x1, y1, z1, x2, y2, z2):
     """Replica of MainWindow.vector_length_simple for testing."""
@@ -113,3 +116,58 @@ class TestHowManyPixelsPerMmAtDistance:
     def test_positive_at_reasonable_distance(self):
         result = how_many_pixels_per_mm_at_distance_on_big_image(25, 1)
         assert result > 0
+
+
+def test_lower_jaw_bounds_include_small_facemesh_tolerance():
+    landmarks = [(0.0, 0.0)] * 478
+    for index in const.FACE_MESH_LOWER_JAW_INDICES:
+        landmarks[index] = (900.0, 1000.0)
+    landmarks[const.FACE_MESH_LOWER_JAW_INDICES[0]] = (600.0, 900.0)
+    landmarks[const.FACE_MESH_LOWER_JAW_INDICES[-1]] = (1200.0, 900.0)
+
+    assert lower_jaw_x_bounds(landmarks) == (588, 1212)
+
+
+def test_lower_jaw_bounds_require_complete_facemesh():
+    assert lower_jaw_x_bounds([(0.0, 0.0)] * 100) is None
+
+
+class TestNeckToJawWidthRatio:
+    """Regression anchors from the real subjects investigated in
+    NECK_DETECTOR_STATUS.md. IMG_6552/IMG_6572 have a genuine anatomical
+    narrowing below the chin (ratio comfortably below threshold). IMG_6640
+    has none -- the widest visible skin run there is nearly as wide as the
+    jaw itself, which is exactly the signature of endpoints spilling onto
+    the shoulder/chest instead of finding a real neck.
+    """
+
+    def test_basic_ratio(self):
+        # neck width 600 / jaw width 750
+        assert neck_to_jaw_width_ratio(700, 1300, (650, 1400)) == pytest.approx(0.8)
+
+    def test_none_when_jaw_bounds_missing(self):
+        assert neck_to_jaw_width_ratio(700, 1300, None) is None
+
+    def test_none_when_jaw_width_not_positive(self):
+        assert neck_to_jaw_width_ratio(700, 1300, (800, 800)) is None
+        assert neck_to_jaw_width_ratio(700, 1300, (900, 800)) is None
+
+    def test_known_good_case_img_6552_is_below_threshold(self):
+        # mask_left_x=704, mask_right_x=1335, FaceMesh jaw guard (651, 1426)
+        ratio = neck_to_jaw_width_ratio(704, 1335, (651, 1426))
+        assert ratio == pytest.approx(0.8142, abs=1e-3)
+        assert ratio < const.NECK_LOW_CONFIDENCE_RATIO_THRESHOLD
+
+    def test_known_good_case_img_6572_is_below_threshold(self):
+        # mask_left_x=737, mask_right_x=1407, FaceMesh jaw guard (668, 1416)
+        ratio = neck_to_jaw_width_ratio(737, 1407, (668, 1416))
+        assert ratio == pytest.approx(0.8957, abs=1e-3)
+        assert ratio < const.NECK_LOW_CONFIDENCE_RATIO_THRESHOLD
+
+    def test_known_bad_case_img_6640_is_at_or_above_threshold(self):
+        # mask_left_x=579, mask_right_x=1317, FaceMesh jaw guard (554, 1317)
+        # -- the detected "neck" run touches the jaw guard's own right
+        # bound, i.e. no narrowing was found at all.
+        ratio = neck_to_jaw_width_ratio(579, 1317, (554, 1317))
+        assert ratio == pytest.approx(0.9672, abs=1e-3)
+        assert ratio >= const.NECK_LOW_CONFIDENCE_RATIO_THRESHOLD

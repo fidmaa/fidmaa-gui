@@ -5,6 +5,39 @@ from PySide6.QtCore import QPoint
 from . import const
 
 
+def lower_jaw_x_bounds(face_mesh_landmarks):
+    """Return the FaceMesh lower-jaw X envelope with a small safety margin."""
+    if not face_mesh_landmarks or len(face_mesh_landmarks) <= max(
+        const.FACE_MESH_LOWER_JAW_INDICES
+    ):
+        return None
+
+    jaw_xs = [face_mesh_landmarks[index][0] for index in const.FACE_MESH_LOWER_JAW_INDICES]
+    jaw_left = min(jaw_xs)
+    jaw_right = max(jaw_xs)
+    margin = (jaw_right - jaw_left) * const.NECK_JAW_ENVELOPE_MARGIN_FRACTION
+    return round(jaw_left - margin), round(jaw_right + margin)
+
+
+def neck_to_jaw_width_ratio(mask_left_x, mask_right_x, jaw_bounds):
+    """Return (detected neck width) / (jaw width), or None if jaw bounds are
+    unavailable or degenerate.
+
+    A neck is anatomically narrower than the jaw. A ratio near or above 1.0
+    means the detected "neck" row is about as wide as the jaw itself -- no
+    anatomical narrowing was found below the chin, so the endpoints most
+    likely spill onto the shoulder or chest rather than tracing the neck.
+    See NECK_DETECTOR_STATUS.md for the investigation this is based on.
+    """
+    if jaw_bounds is None:
+        return None
+    jaw_left, jaw_right = jaw_bounds
+    jaw_width = jaw_right - jaw_left
+    if jaw_width <= 0:
+        return None
+    return (mask_right_x - mask_left_x) / jaw_width
+
+
 def findPoint(
     startX,
     startY,

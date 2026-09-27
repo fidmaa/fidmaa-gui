@@ -1,11 +1,12 @@
 import math
 import os
+import signal
 import sys
 from functools import partial
 from textwrap import dedent
 
 import numpy as np
-from PIL import ImageFile
+from PIL import ImageDraw, ImageFile
 from portrait_analyser.depth_sampling import (
     measure_filtered_surface_length,
     median_filter_depthmap,
@@ -31,7 +32,7 @@ from portrait_analyser.neck import (
 from portrait_analyser.pose import PortraitPose, detect_neck_midpoint
 from portrait_analyser.tmd import compute_tmd_3d
 from PySide6 import QtGui
-from PySide6.QtCore import QObject, QPoint, QSettings, Qt
+from PySide6.QtCore import QObject, QPoint, QSettings, Qt, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QApplication,
@@ -53,12 +54,13 @@ from PySide6.QtWidgets import (
 )
 
 from . import const, errors
-from .calculations import findPoint
+from .calculations import findPoint, lower_jaw_x_bounds, neck_to_jaw_width_ratio
 from .depth_visualization import (
     DepthDisplayMode,
     render_depth_contour_overlay,
     render_depth_visualization,
 )
+from .neck_arc import compute_neck_arc
 from .region_measurement import (
     MeasurementError,
     Region,
@@ -114,6 +116,9 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.teethmap = None
         self.neck_measurement_auto = None
         self.neck_search_bounds = None
+        self.neck_lateral_bounds = None
+        self.neck_confidence_ratio = None
+        self.neck_arc = None
 
         self.float_max_value = self.float_min_value = None
 
@@ -844,8 +849,41 @@ class MainWindow(UILoaderMixin, QMainWindow):
         finally:
             painter.restore()
 
+    def _paint_geometric_neck_arc(self, painter, point_mapper, *, labels=False):
+        """Paint the jaw-parallel measuring arc and its silhouette endpoints."""
+        result = self.neck_arc
+        if result is None:
+            return
+
+        points = [point_mapper(point) for point in result.arc_points_photo]
+        if len(points) < 2:
+            return
+
+        painter.save()
+        try:
+            arc_color = QColor(255, 60, 200, 235)
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QtGui.QPen(arc_color, 3))
+            for first, second in zip(points, points[1:]):
+                painter.drawLine(first, second)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(arc_color)
+            for point in points:
+                painter.drawEllipse(point, 4, 4)
+            if labels:
+                painter.setPen(arc_color)
+                painter.setBrush(Qt.NoBrush)
+                painter.drawText(
+                    points[0] + QPoint(4, -8),
+                    f"{result.circumference_mm / 10.0:.1f} cm",
+                )
+        finally:
+            painter.restore()
+
     def _paint_neck_depth_overlay(self, painter, point_mapper, *, labels=False):
         """Paint skin-matte edges and their corrected stable depth samples."""
+        self._paint_geometric_neck_arc(painter, point_mapper, labels=labels)
+
         measurement = self.neck_measurement_auto
         if measurement is None:
             return
@@ -2022,8 +2060,14 @@ class MainWindow(UILoaderMixin, QMainWindow):
             elif pose == PortraitPose.NEUTRAL_NECK:
                 if self.neck_measurement_auto:
                     nma = self.neck_measurement_auto
+                    low_confidence = (
+                        self.neck_confidence_ratio is not None
+                        and self.neck_confidence_ratio >= const.NECK_LOW_CONFIDENCE_RATIO_THRESHOLD
+                    )
                     txt += "\n\nAutomatic neck circumference (3D arc): "
                     txt += f"{nma.circumference_mm / 10.0:.2f} cm"
+                    if low_confidence:
+                        txt += "  ⚠ LOW CONFIDENCE"
                     txt += f"\n  Front surface arc (3D polyline): {nma.front_arc_length_mm:.2f} mm"
                     if nma.front_chord_length_mm is not None:
                         txt += (
@@ -2037,11 +2081,56 @@ class MainWindow(UILoaderMixin, QMainWindow):
                             "\n  Anatomical search band:"
                             f" Y {self.neck_search_bounds[0]}–{self.neck_search_bounds[1]} px"
                         )
+                    if self.neck_lateral_bounds is not None:
+                        txt += (
+                            "\n  FaceMesh jaw guard:"
+                            f" X {self.neck_lateral_bounds[0]}–{self.neck_lateral_bounds[1]} px"
+                        )
                     txt += (
                         "\n  Skin → stable depth:"
                         f" L {nma.mask_left_x} → {nma.left_x} px,"
                         f" R {nma.mask_right_x} → {nma.right_x} px"
                     )
+                    if self.neck_confidence_ratio is not None:
+                        txt += (
+                            "\n  Neck/jaw width ratio:"
+                            f" {self.neck_confidence_ratio:.2f}"
+                            f" (warn at ≥ {const.NECK_LOW_CONFIDENCE_RATIO_THRESHOLD:.2f})"
+                        )
+                    if low_confidence:
+                        txt += (
+                            "\n  ⚠ No anatomical narrowing was found below the chin --"
+                            " this measurement likely includes shoulder or chest skin,"
+                            " not just the neck."
+                        )
+
+                    if self.neck_arc is not None:
+                        arc = self.neck_arc
+                        txt += "\n\n[Geometric] Neck circumference: "
+                        txt += f"{arc.circumference_mm / 10.0:.2f} cm"
+                        txt += (
+                            f"\n  Measuring line: {arc.offset_px} px below the jaw"
+                            f" (Y={arc.measuring_y})"
+                        )
+                        txt += (
+                            f"\n  Silhouette edges: X {arc.left_x} → {arc.right_x} px"
+                            f"   width {arc.raw_width_mm:.1f} mm"
+                        )
+                        txt += (
+                            f"\n  Width after erosion correction"
+                            f" (×{const.NECK_SILHOUETTE_EROSION_CORRECTION:.3f}):"
+                            f" {arc.corrected_width_mm:.1f} mm"
+                        )
+                        txt += f"\n  Visible 3D arc: {arc.front_arc_length_mm:.1f} mm"
+                        txt += (
+                            f"\n  Apex X {arc.apex_x} vs facial midline X {arc.midline_x}"
+                            f" ({arc.apex_x - arc.midline_x:+d} px)"
+                        )
+                    else:
+                        txt += (
+                            "\n\n[Geometric] Neck circumference: unavailable"
+                            " — no stable neck level found below the chin"
+                        )
 
                     # Neck circumference approximation from diameter (left_x → right_x) * pi
                     left_display = translate_coordinates_to_other_image(
@@ -2054,13 +2143,15 @@ class MainWindow(UILoaderMixin, QMainWindow):
                         self.portrait.skinmap.size,
                         (const.MAIN_IMAGE_WIDTH, const.MAIN_IMAGE_HEIGHT),
                     )
-                    diameter_mm = self.vector_length_between_two_clicks(
-                        *left_display, *right_display
-                    )
-                    circumference_from_radius = diameter_mm * math.pi
+                    diameter_mm = nma.front_chord_length_mm
+                    if diameter_mm is None:
+                        diameter_mm = self.vector_length_between_two_clicks(
+                            *left_display, *right_display
+                        )
+                    circumference_from_diameter_mm = diameter_mm * math.pi
                     txt += (
                         "\n\nNeck approximation from Euclidean diameter × π:"
-                        f" {circumference_from_radius / 10.0:.2f} cm"
+                        f" {circumference_from_diameter_mm / 10.0:.2f} cm"
                         f"\n  Diameter (3D): {diameter_mm / 10.0:.2f} cm"
                     )
                     txt += "\n  Straight-row surface vector (median depth):"
@@ -2310,6 +2401,9 @@ class MainWindow(UILoaderMixin, QMainWindow):
         segmentation/depth-based extended neck analysis.
         """
         self.neck_measurement_auto = None
+        self.neck_lateral_bounds = None
+        self.neck_confidence_ratio = None
+        self.neck_arc = None
         self.neck_midpoint = None
         self.mediapipe_debug = None
         self.face_mesh_debug = None
@@ -2449,6 +2543,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
         scan_start_y = None
         scan_end_y = None
         arc_midpoint_y = None
+        face_mesh_landmarks = None
         self.neck_search_bounds = None
         if self.neck_midpoint:
             face_mesh_landmarks = (
@@ -2462,12 +2557,32 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 pose_neck_y=self.neck_midpoint.y,
             )
             self.neck_search_bounds = (scan_start_y, scan_end_y)
-            if self.neck_midpoint.y is not None:
+            if self.neck_midpoint.y is not None and scan_start_y < scan_end_y:
                 arc_midpoint_y = clamp(
                     self.neck_midpoint.y,
                     scan_start_y,
                     scan_end_y - 1,
                 )
+
+        neck_skinmap = self.portrait.skinmap
+        jaw_bounds = lower_jaw_x_bounds(face_mesh_landmarks)
+        if jaw_bounds is not None and neck_skinmap is not None and scan_start_y < scan_end_y:
+            jaw_left = max(0, jaw_bounds[0])
+            jaw_right = min(img_w - 1, jaw_bounds[1])
+            if jaw_left < jaw_right:
+                self.neck_lateral_bounds = (jaw_left, jaw_right)
+                neck_skinmap = neck_skinmap.copy()
+                mask_draw = ImageDraw.Draw(neck_skinmap)
+                if jaw_left > 0:
+                    mask_draw.rectangle(
+                        (0, scan_start_y, jaw_left - 1, scan_end_y - 1),
+                        fill=0,
+                    )
+                if jaw_right < img_w - 1:
+                    mask_draw.rectangle(
+                        (jaw_right + 1, scan_start_y, img_w - 1, scan_end_y - 1),
+                        fill=0,
+                    )
 
         if (
             self.portrait.skinmap
@@ -2475,9 +2590,10 @@ class MainWindow(UILoaderMixin, QMainWindow):
             and self.neck_midpoint
             and self.neck_midpoint.x is not None
             and self.neck_midpoint.pose == PortraitPose.NEUTRAL_NECK
+            and scan_start_y < scan_end_y
         ):
             self.neck_measurement_auto = compute_neck_circumference(
-                skinmap=self.portrait.skinmap,
+                skinmap=neck_skinmap,
                 depthmap=self.portrait.depthmap,
                 photo_width=img_w,
                 photo_height=self.image.size[1],
@@ -2486,10 +2602,43 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 scan_start_y=scan_start_y,
                 scan_end_y=scan_end_y,
                 neck_midpoint_y=arc_midpoint_y,
-                circumference_multiplier=2.7,
-                n_samples=25,
+                circumference_multiplier=3.0,
+                n_samples=7,
                 hairmap=self.portrait.hairmap,
             )
+
+        if self.neck_measurement_auto is not None:
+            self.neck_confidence_ratio = neck_to_jaw_width_ratio(
+                self.neck_measurement_auto.mask_left_x,
+                self.neck_measurement_auto.mask_right_x,
+                self.neck_lateral_bounds,
+            )
+
+        # Geometric neck arc: parallel to the FaceMesh lower jaw, at the height
+        # where the depth surface stops receding below the chin. Independent of
+        # the skin matte, so it is not fooled by bare skin running continuously
+        # from jaw to chest (see NECK_DETECTOR_STATUS.md).
+        if (
+            face_mesh_landmarks is not None
+            and self.filtered_depthmap is not None
+            and self.neck_midpoint is not None
+            and self.neck_midpoint.pose == PortraitPose.NEUTRAL_NECK
+        ):
+            try:
+                self.neck_arc = compute_neck_arc(
+                    self.filtered_depthmap,
+                    jaw_points=[face_mesh_landmarks[i] for i in const.FACE_MESH_LOWER_JAW_INDICES],
+                    chin_xy=face_mesh_landmarks[const.FACE_MESH_CHIN_INDEX],
+                    nose_xy=face_mesh_landmarks[const.FACE_MESH_NOSE_TIP_INDEX],
+                    lower_lip_xy=face_mesh_landmarks[const.FACE_MESH_LOWER_LIP_INDEX],
+                    photo_width=img_w,
+                    photo_height=self.image.size[1],
+                    float_min=self.portrait.floatValueMin,
+                    float_max=self.portrait.floatValueMax,
+                )
+            except (IndexError, ValueError) as e:
+                print(f"compute_neck_arc failed: {type(e).__name__}: {e}")
+                self.neck_arc = None
 
         # Compute thyromental distance (chin -> neck midpoint)
         if (
@@ -2692,6 +2841,18 @@ def main():
     mainWindow = MainWindow()
     mainWindow.updateWindowTitle()
     mainWindow.show()
+
+    def handle_sigint(_signum, _frame):
+        mainWindow.close()
+        app.quit()
+
+    signal.signal(signal.SIGINT, handle_sigint)
+
+    # Qt's native event loop can otherwise keep Python from dispatching
+    # SIGINT until another Python callback runs.
+    sigint_timer = QTimer(app)
+    sigint_timer.timeout.connect(lambda: None)
+    sigint_timer.start(100)
 
     screen = app.primaryScreen().geometry()
     mainWindow.move(
