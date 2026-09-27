@@ -17,9 +17,9 @@ Since portrait-analyser 0.8, ``IOSPortrait.depth`` is a ``DepthMap``: a
 ``LegacyDepthMap`` (8-bit Camera-app disparity, sampled exactly as before) or a
 ``FloatDepthMap`` (capture-app depth in metres, NaN = no depth). Capture-app
 photos are measured on the float map; their 8-bit ``depthmap`` is display
-only. ``IOSPortrait.depth_repaired`` names a repair the library applied (e.g.
-depth stored as disparity, i.e. inverted); such photos are measured, with a
-visible warning.
+only. ``IOSPortrait.depth_repaired`` names a repair the library applied (iOS 26
+stores metres under a disparity label); such photos are measured, with a
+visible warning. The library's ``depth_plausible`` verdict is trusted as is.
 
 All helpers take duck-typed objects (``getattr`` with defaults) so they work
 with the lightweight stand-ins used by the unit tests.
@@ -27,7 +27,6 @@ with the lightweight stand-ins used by the unit tests.
 
 import dataclasses
 import logging
-import re
 
 from portrait_analyser import check_depth_plausibility
 
@@ -103,16 +102,19 @@ def float_depth(portrait):
     return None
 
 
-def depth_repair_description(portrait):
-    """Short description of the library's depth repair, or None.
+# portrait_analyser's ``DEPTH_REPAIRED_RECIPROCAL`` (not imported: absent
+# from older library versions).
+DEPTH_REPAIRED_IOS26 = "metres stored under a disparity label (iOS 26)"
 
-    ``"reciprocal (depth stored as disparity)"`` -> ``"depth stored as disparity"``.
-    """
+
+def depth_repair_description(portrait):
+    """User-facing description of the library's depth repair, or None."""
     repaired = getattr(portrait, "depth_repaired", None) if portrait is not None else None
     if not repaired:
         return None
-    match = re.search(r"\((.+)\)", str(repaired))
-    return match.group(1) if match else str(repaired)
+    if repaired == DEPTH_REPAIRED_IOS26:
+        return "Depth repaired: iOS 26 stored metres under a disparity label"
+    return f"Depth repaired: {repaired}"
 
 
 def depth_is_implausible(portrait):
@@ -158,11 +160,12 @@ def depth_source_status(portrait):
         )
     repair = depth_repair_description(portrait)
     if repair is not None:
+        # Trust the library's verdict (depth_plausible): never re-check a
+        # repaired map here (e.g. a board nearer than the face would fail).
         source = "TrueDepth absolute" if accuracy == "absolute" else (accuracy or "unknown")
         return (
-            f"Depth: {source} (repaired: {repair})",
-            f"Depth map was repaired ({repair}) — measurements use the repaired depth; "
-            "double-check them.",
+            f"Depth: {source} (repaired)",
+            f"{repair} — measurements use the repaired depth; double-check them.",
         )
     if accuracy == "absolute":
         if getattr(portrait, "camera", None) is not None:

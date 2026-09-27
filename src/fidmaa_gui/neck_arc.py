@@ -26,8 +26,8 @@ The measurement follows the anatomy rather than the skin matte:
 Raw depth values are inverse to physical distance: a HIGHER raw value means
 CLOSER to the camera.  Everything below works in millimetres instead, via
 the EXIF calibration, so the geometry is in real units.  Capture-app photos
-pass their median-filtered float ``DepthMap`` (``depth=``); its millimetres
-are read directly, without the 8-bit encoding.
+pass their float ``DepthMap`` (``depth=``); the library's integration map of
+it is read directly, without the 8-bit encoding.
 """
 
 from dataclasses import dataclass, field
@@ -308,16 +308,20 @@ def compute_neck_arc(
     capture-app intrinsics) or None for the legacy calibration polynomial.
     The horizontal focal length sets the pixels-per-mm scale.
     `zero_is_invalid`: raw code 0 means "no depth" (capture-app maps).
-    `depth`: optional median-filtered portrait_analyser ``DepthMap``
-    (``portrait.depth.median_filtered()``); when given it replaces
-    `filtered_depthmap`, `float_min`, `float_max` and `zero_is_invalid`, and
-    float maps are read at full precision.
+    `depth`: optional portrait_analyser ``DepthMap`` (``portrait.depth``);
+    when given it replaces `filtered_depthmap`, `float_min`, `float_max` and
+    `zero_is_invalid`. Float maps are read at full precision from the
+    library's ``depth.integration_map(camera)`` (its own smoothing for
+    along-path integration); a legacy ``DepthMap`` must be the
+    median-filtered one and is read exactly as the 8-bit path.
     """
     if not jaw_points:
         return None
     if depth is None and (float_min is None or float_max is None):
         return None
-    if depth is not None and not getattr(depth, "is_float", False):
+    if depth is not None and getattr(depth, "is_float", False) is True:
+        depth = depth.integration_map(camera)
+    elif depth is not None:
         if depth.float_min is None or depth.float_max is None:
             return None
     n_samples = n_samples or const.NECK_ARC_SAMPLE_COUNT

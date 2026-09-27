@@ -26,7 +26,8 @@ LegacyDepthMap = depth_map.LegacyDepthMap
 
 PHOTO_SIZE = (3024, 4032)
 CAMERA = CameraModel(fx=2766.1, fy=2766.1, cx=1499.1, cy=2019.6)
-REPAIRED = "reciprocal (depth stored as disparity)"
+REPAIRED = "metres stored under a disparity label (iOS 26)"
+REPAIRED_TEXT = "Depth repaired: iOS 26 stored metres under a disparity label"
 
 # Not representable by an 8-bit disparity code: the float path must keep them.
 NEAR_M = 0.35123
@@ -146,12 +147,22 @@ def test_surface_on_flat_float_depth_matches_the_straight_line(qapp):
     window.close()
 
 
-def test_vector_touching_a_float_hole_is_na(qapp):
-    # A single missing pixel: the median filter would fill it, the point read not.
+def test_float_click_is_a_nan_aware_3x3_median(qapp):
     depth_m = np.full((640, 480), NEAR_M)
-    depth_m[320, 200] = np.nan
+    depth_m[320, 200] = np.nan  # single-pixel hole: the 8 neighbours answer
+    depth_m[100, 50] = 0.9  # single outlier: the median ignores it
     window = _float_window(depth_m)
-    display_x, display_y = 200 * 480 / 479, 320 * 640 / 639
+    hole = (200 * 480 / 479, 320 * 640 / 639)
+    outlier = (50 * 480 / 479, 100 * 640 / 639)
+    assert window.distance_for_click(*hole) == pytest.approx(NEAR_M * 100, rel=1e-12)
+    assert window.distance_for_click(*outlier) == pytest.approx(NEAR_M * 100, rel=1e-12)
+    window.close()
+
+
+def test_vector_touching_a_float_hole_is_na(qapp):
+    # Middle of the 11x11 hole: no valid pixel in the 3x3 window.
+    window = _float_window()
+    display_x, display_y = 105 * 480 / 479, 305 * 640 / 639
     assert window.distance_for_click(display_x, display_y) is None
 
     window._on_image_clicked(QPointF(100, 100))
@@ -205,7 +216,7 @@ def test_zoom_readout_keeps_raw_codes_for_legacy(qapp):
 
 
 def test_region_engine_samples_float_centimetres():
-    depth = FloatDepthMap(_float_depth_m(), PHOTO_SIZE).median_filtered()
+    depth = FloatDepthMap(_float_depth_m(), PHOTO_SIZE).integration_map(CAMERA)
     engine = RegionMeasurementEngine(
         filtered_depthmap=depth,
         display_size=(480, 640),
@@ -278,7 +289,9 @@ def _synthetic_neck_codes():
         photo_width=width,
         photo_height=height,
     )
-    return codes, kwargs
+    # Depth maps are lower resolution than the photo (real files: 480x640 for
+    # 3024x4032); this also keeps the library's 2 mm smoothing kernel small.
+    return codes[::6, ::6], kwargs
 
 
 def test_neck_arc_on_float_depth_matches_the_8bit_result():
@@ -313,8 +326,8 @@ def test_repaired_depth_status_line_and_warning():
             depth_repaired=REPAIRED,
         )
     )
-    assert line == "Depth: TrueDepth absolute (repaired: depth stored as disparity)"
-    assert "repaired" in warning and "depth stored as disparity" in warning
+    assert line == "Depth: TrueDepth absolute (repaired)"
+    assert warning.startswith(REPAIRED_TEXT)
 
 
 def test_repaired_depth_is_shown_and_still_measured(qapp):
@@ -322,12 +335,9 @@ def test_repaired_depth_is_shown_and_still_measured(qapp):
     window.neck_midpoint = None
     window._update_automatic_results()
 
-    assert (
-        "Depth: TrueDepth absolute (repaired: depth stored as disparity)"
-        in window.measurementPanel.autoLabel.text()
-    )
+    assert "Depth: TrueDepth absolute (repaired)" in window.measurementPanel.autoLabel.text()
     assert not window.measurementPanel.autoWarningLabel.isHidden()
-    assert "repaired" in window.measurementPanel.autoWarningLabel.text()
+    assert REPAIRED_TEXT in window.measurementPanel.autoWarningLabel.text()
 
     window._on_image_clicked(QPointF(100, 200))
     window._on_image_clicked(QPointF(100, 400))
@@ -433,4 +443,48 @@ def test_3d_view_gets_the_float_maps_display_encoding(qapp, monkeypatch):
     _, depthmap, seen_min, seen_max = seen["args"]
     assert depthmap.tobytes() == image.convert("L").tobytes()
     assert (seen_min, seen_max) == (float_min, float_max)
+    window.close()
+
+
+def test_repaired_depth_is_not_rechecked_by_the_gui(qapp, monkeypatch):
+    """The library's depth_plausible verdict is final: a repaired map where a
+    board is nearer than the face (IMG_2376) must stay measurable."""
+
+    def fail(*args, **kwargs):
+        raise AssertionError("the GUI must not re-run the plausibility check")
+
+    monkeypatch.setattr("fidmaa_gui.depth_source.check_depth_plausibility", fail)
+    window = _float_window(depth_repaired=REPAIRED, depth_plausible=True)
+    window.neck_midpoint = None
+    window._update_automatic_results()
+    assert "implausible" not in window.measurementPanel.autoLabel.text()
+    assert window.linear_length_between_two_clicks_or_none(100, 200, 100, 400) is not None
+    window.close()
+
+
+def test_float_surface_and_neck_arc_use_the_librarys_integration_map(qapp, monkeypatch):
+    window = _float_window()
+    depth = window.portrait.depth
+    calls = []
+    original = type(depth).integration_map
+
+    def spy(self, camera=None):
+        calls.append(camera)
+        return original(self, camera)
+
+    monkeypatch.setattr(type(depth), "integration_map", spy)
+    assert window.surface_vector_filtered(60, 100, 60, 600, 3) is not None
+    assert calls and calls[-1] is CAMERA
+
+    calls.clear()
+    codes, kwargs = _synthetic_neck_codes()
+    neck_depth = FloatDepthMap(
+        1.0 / (4.0 * codes / 255.0 + 0.5 * (1.0 - codes / 255.0)),
+        (kwargs["photo_width"], kwargs["photo_height"]),
+    )
+    camera = CameraModel(fx=2700.0, fy=2720.0, cx=440.0, cy=610.0)
+    compute_neck_arc(
+        None, float_min=None, float_max=None, camera=camera, depth=neck_depth, **kwargs
+    )
+    assert calls == [camera]
     window.close()

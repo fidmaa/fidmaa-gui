@@ -118,19 +118,18 @@ def window_float_depth(window):
     return float_depth(getattr(window, "portrait", None))
 
 
-def window_filtered_float_depth(window):
-    """Median-filtered float ``DepthMap`` of the window's photo, or None.
+def window_integration_depth(window):
+    """The library's integration map of the window's float depth, or None.
 
-    Cached on the window per source map, like ``filtered_depthmap``.
+    ``portrait.depth.integration_map(camera)``: portrait-analyser's own
+    smoothing for anything integrated along a path or region on float depth
+    (3x3 median + edge-preserving 2 mm Gaussian, cached by the library). The
+    GUI never filters float depth itself.
     """
     depth = window_float_depth(window)
     if depth is None:
         return None
-    cached = getattr(window, "_filtered_float_depth_cache", None)
-    if cached is None or cached[0] is not depth:
-        cached = (depth, depth.median_filtered())
-        window._filtered_float_depth_cache = cached
-    return cached[1]
+    return depth.integration_map(portrait_camera(window))
 
 
 class MainWindow(UILoaderMixin, QMainWindow):
@@ -167,8 +166,6 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.portrait: IOSPortrait = None
         self.depthmap = None
         self.filtered_depthmap = None
-        # (source DepthMap, its median-filtered variant) for float depth.
-        self._filtered_float_depth_cache = None
         self.teethmap = None
         self.neck_measurement_auto = None
         self.neck_search_bounds = None
@@ -1068,9 +1065,9 @@ class MainWindow(UILoaderMixin, QMainWindow):
         mode_b = SelectionMode(self.regionModeBCombo.currentText())
         mask_a = RegionMask(self.regionMaskACombo.currentText())
         mask_b = RegionMask(self.regionMaskBCombo.currentText())
-        # Float (capture-app) depth: the engine samples the median-filtered
-        # float map in centimetres; legacy photos keep the 8-bit codes.
-        filtered_float = self._filtered_float_depth()
+        # Float (capture-app) depth: the engine samples the library's
+        # integration map in centimetres; legacy photos keep the 8-bit codes.
+        filtered_float = window_integration_depth(self)
         engine = RegionMeasurementEngine(
             filtered_depthmap=(
                 filtered_float if filtered_float is not None else self.filtered_depthmap
@@ -2551,10 +2548,6 @@ class MainWindow(UILoaderMixin, QMainWindow):
         """The photo's float ``DepthMap`` (capture-app files), or None (legacy)."""
         return window_float_depth(self)
 
-    def _filtered_float_depth(self):
-        """Median-filtered float ``DepthMap`` (cached per source map), or None."""
-        return window_filtered_float_depth(self)
-
     def display_to_photo_coordinates(self, x, y):
         """480x640 display point -> full-resolution photo point (per axis),
         clamped to the photo."""
@@ -2570,16 +2563,19 @@ class MainWindow(UILoaderMixin, QMainWindow):
         """Camera distance (cm) at a display-space point, or None if invalid.
 
         Float (capture-app) depth is read at full precision from
-        ``portrait.depth`` (the single nearest depth pixel, NaN = None).
-        Legacy 8-bit photos keep the historical nearest-pixel read and
-        conversion, so their values are unchanged.
+        ``portrait.depth`` as the NaN-aware median of the 3x3 depth pixels
+        around the point (``radius=1``): unfiltered TrueDepth depth has ~1 mm
+        per-pixel jitter and isolated holes, so a single missing pixel does
+        not turn a click into "n/a"; only a click with no valid pixel in its
+        3x3 window does. Legacy 8-bit photos keep the historical single
+        nearest-pixel read and conversion, so their values are unchanged.
         """
         depth = self._float_depth()
         if depth is None:
             return self.get_depthmap_distance(self.get_depthmap_value(x, y))
         if depth_is_implausible(getattr(self, "portrait", None)):
             return None
-        return depth.distance_cm(*self.display_to_photo_coordinates(x, y), radius=0)
+        return depth.distance_cm(*self.display_to_photo_coordinates(x, y), radius=1)
 
     def depth_readout_at_native(self, depth_x, depth_y):
         """Zoom-view readout for float depth at a native depth pixel, or None
@@ -2692,8 +2688,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
         if depth_is_implausible(getattr(self, "portrait", None)):
             return None
 
-        filtered_float = window_filtered_float_depth(self)
-        if filtered_float is None and self.filtered_depthmap is None:
+        depth = window_float_depth(self)
+        if depth is None and self.filtered_depthmap is None:
             self.filtered_depthmap = median_filter_depthmap(self.depthmap, size=3)
 
         photo_width, photo_height = self.image.size
@@ -2711,9 +2707,10 @@ class MainWindow(UILoaderMixin, QMainWindow):
             )
         ]
 
-        if filtered_float is not None:
-            # Capture-app photo: full-precision float depth, NaN-aware median.
-            return filtered_float.surface_length_mm(points_photo, camera=portrait_camera(self))
+        if depth is not None:
+            # Capture-app photo: the library integrates full-precision float
+            # depth over its own smoothed integration map (with the camera).
+            return depth.surface_length_mm(points_photo, camera=portrait_camera(self))
 
         return measure_filtered_surface_length(
             self.filtered_depthmap,
@@ -2813,7 +2810,6 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.image = image
         self.depthmap = depthmap
         self.filtered_depthmap = filtered_depthmap
-        self._filtered_float_depth_cache = None
         self._float_cm_cache = None
         self.teethmap = teethmap
         self.float_min_value = float_min_value
@@ -3075,7 +3071,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
                     float_max=self.portrait.floatValueMax,
                     camera=portrait_camera(self),
                     zero_is_invalid=depth_zero_is_invalid(self.portrait),
-                    depth=self._filtered_float_depth(),
+                    depth=window_float_depth(self),
                 )
             except (IndexError, ValueError) as e:
                 print(f"compute_neck_arc failed: {type(e).__name__}: {e}")
