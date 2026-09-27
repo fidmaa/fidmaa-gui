@@ -33,8 +33,14 @@ from fidmaa_gui.measurement_tools import MeasurementTool
 from .test_float_depth import PHOTO_SIZE, _float_window
 from .test_tool_interaction_ui import _window_with_flat_depth
 
+TAIL = " (52 rows with skin edges; clean, stable rows span 0.0 mm, 2 mm needed)"
 EDGES_OCCLUDED = (
     "neck edges not visible -- take the photo from further away / include the neck below the chin"
+    + TAIL
+)
+COLLAR_ADVICE = (
+    "neck edges hidden by the collar or beard -- open or lower the collar and include "
+    "the neck below the chin"
 )
 
 
@@ -174,13 +180,55 @@ def test_panel_shows_neck_width_warnings(qapp):
 
 
 def test_panel_shows_library_message_and_tool_hint_when_edges_hidden(qapp):
+    # The advice sentences live in the (unreleased) library's neck_width module.
+    pytest.importorskip("portrait_analyser.neck_width")
     window = _neutral_float_window(_failed_result("edges-occluded", EDGES_OCCLUDED))
     window._update_automatic_results()
 
     text = window.measurementPanel.autoLabel.text()
     assert "Neck width: n/a — Neck edges not visible — take the photo" in text
+    assert "rows with skin edges" not in text
     assert "Neck tool (N)" in text
     assert "Neck circumference" not in text
+    window.close()
+
+
+def _occluded(message, counts):
+    result = _failed_result("edges-occluded", message)
+    result.reject_counts = counts
+    result.warnings = ["outside nearer than neck edge (collar?) on 12 rows"]
+    return result
+
+
+def test_panel_shows_only_the_advice_sentence(qapp):
+    # The advice sentences live in the (unreleased) library's neck_width module.
+    pytest.importorskip("portrait_analyser.neck_width")
+    # The advice itself contains parentheses; only the technical tail goes.
+    beside = "something next to the neck (hand, hair?) -- keep it away from the neck"
+    for advice, shown in (
+        (COLLAR_ADVICE, "Neck edges hidden by the collar or beard — open or lower the collar"),
+        (beside, "Something next to the neck (hand, hair?) — keep it away from the neck"),
+    ):
+        window = _neutral_float_window(_occluded(advice + TAIL, {"occluded": 12}))
+        window._update_automatic_results()
+        lines = window.measurementPanel.autoLabel.text().splitlines()
+        (line,) = [line for line in lines if line.startswith("Neck width")]
+        assert line.startswith(f"Neck width: n/a — {shown}")
+        assert line.endswith("neck") or line.endswith("chin")
+        assert "rows" not in line
+        window.close()
+
+
+def test_diagnostics_keep_the_full_message_and_rejected_row_counts(qapp):
+    window = _neutral_float_window(
+        _occluded(COLLAR_ADVICE + TAIL, {"occluded": 12, "off-centre": 3})
+    )
+    window.neck_measurement_auto = None
+    text = window._diagnostics_text()
+    assert "[Neck width] status: edges-occluded" in text
+    assert "52 rows with skin edges" in text
+    assert "Rejected rows: occluded 12, off-centre 3" in text
+    assert "Rejected rows" not in window.measurementPanel.autoLabel.text()
     window.close()
 
 
@@ -417,7 +465,7 @@ def test_neck_tool_shows_quality(qapp, monkeypatch):
     details = window.measurementPanel.detailsLabel.text()
     assert f"⚠ Neck width quality: low — {reason}" in details
     assert details.count("head rotated?") == 1
-    assert "Quality: low" in details
+    assert details.count("quality: low") + details.count("Quality: low") == 1
     assert "below the chin" not in details
     window.close()
 

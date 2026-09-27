@@ -1,3 +1,4 @@
+import importlib
 import logging
 import math
 import os
@@ -128,13 +129,36 @@ NECK_WIDTH_QUALITY_LOW = "low"
 NECK_WIDTH_TOOL_HELPS = ("edges-occluded", "no-face")
 
 
-def neck_width_message(result, portrait=None):
+def _library_advice_texts():
+    """portrait_analyser.neck_width's ADVICE_* sentences, longest first.
+
+    Empty for library versions without them (then the whole message is shown).
+    """
+    try:
+        module = importlib.import_module("portrait_analyser.neck_width")
+    except ImportError:
+        # Older portrait-analyser (e.g. the pinned 0.8.0) has no neck width
+        # module; there is no advice to pick out, which is not an error.
+        return []
+    advice = [v for k, v in vars(module).items() if k.startswith("ADVICE_") and isinstance(v, str)]
+    return sorted(advice, key=len, reverse=True)
+
+
+def _sentence(text):
+    text = str(text).replace(" -- ", " — ")
+    return text[:1].upper() + text[1:]
+
+
+def neck_width_message(result, portrait=None, *, full=False):
     """User-facing text of a NeckWidthResult's ``message``.
 
-    The library writes e.g. "neck edges not visible -- take the photo ...";
-    shown as "Neck edges not visible — take the photo ...". ``no-camera``
-    distinguishes missing intrinsics from intrinsics the library could not
-    use (the file has a focal length, as the library checks).
+    The library writes e.g. "neck edges hidden by the collar or beard -- open
+    or lower the collar ... (52 rows with skin edges; ... 2 mm needed)"; the
+    panel shows only the leading advice sentence ("Neck edges hidden by the
+    collar or beard — open or lower the collar ..."), ``full=True`` (the
+    diagnostics) the whole message. ``no-camera`` distinguishes missing
+    intrinsics from intrinsics the library could not use (the file has a
+    focal length, as the library checks).
     """
     status = getattr(result, "status", None)
     if status == "no-camera":
@@ -143,9 +167,12 @@ def neck_width_message(result, portrait=None):
         return NECK_WIDTH_NO_CAMERA_TEXT
     if status == "relative-depth":
         return NECK_WIDTH_RELATIVE_DEPTH_TEXT
-    message = getattr(result, "message", None) or getattr(result, "status", None) or "unknown"
-    message = str(message).replace(" -- ", " — ")
-    return message[:1].upper() + message[1:]
+    message = str(getattr(result, "message", None) or status or "unknown")
+    if not full and status == "edges-occluded":
+        for advice in _library_advice_texts():
+            if message.startswith(advice):
+                return _sentence(advice)
+    return _sentence(message)
 
 
 def neck_width_quality_warning(result):
@@ -165,13 +192,14 @@ def neck_width_other_warnings(result):
     return [w for w in (getattr(result, "warnings", None) or []) if w not in reasons]
 
 
-def neck_width_position_text(result):
-    """ "measured 1,2 cm below the chin · quality: good" (parts left out when unknown)."""
+def neck_width_position_text(result, *, quality=True):
+    """ "measured 1,2 cm below the chin · quality: good" (parts left out when
+    unknown; ``quality=False`` leaves the quality out)."""
     parts = []
     height_mm = getattr(result, "height_below_chin_mm", None)
     if height_mm is not None:
         parts.append(f"measured {format_cm(height_mm, 1)} below the chin")
-    quality = getattr(result, "quality", None)
+    quality = getattr(result, "quality", None) if quality else None
     if quality is not None:
         parts.append(f"quality: {quality}")
     return " · ".join(parts) if parts else None
@@ -867,10 +895,14 @@ class MainWindow(UILoaderMixin, QMainWindow):
                     result.circumference_ellipse_mm, result.circumference_circle_mm
                 ),
             )
+            # Quality once: the low-quality warning (with reasons), else a
+            # plain "Quality: good" line.
             quality_warning = neck_width_quality_warning(result)
             if quality_warning is not None:
                 details.append(f"⚠ {quality_warning}")
-            position = neck_width_position_text(result)
+            elif getattr(result, "quality", None) is not None:
+                details.append(f"Quality: {result.quality}")
+            position = neck_width_position_text(result, quality=False)
             if position is not None:
                 details.append(position[:1].upper() + position[1:])
             left_cm = result.left_depth_cm
@@ -3463,7 +3495,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
             return txt + "not available"
         txt += f"status: {result.status}"
         if result.status != NECK_WIDTH_OK:
-            txt += f"\n  {neck_width_message(result, self.portrait)}"
+            txt += f"\n  {neck_width_message(result, self.portrait, full=True)}"
         else:
             low, high = result.circumference_ellipse_mm
             txt += (
@@ -3497,6 +3529,10 @@ class MainWindow(UILoaderMixin, QMainWindow):
             txt += (
                 f"\n  Band: Y {result.band[0]:.0f}–{result.band[1]:.0f} px ({result.band_source})"
             )
+        reject_counts = getattr(result, "reject_counts", None)
+        if reject_counts:
+            counts = ", ".join(f"{code} {count}" for code, count in reject_counts.items())
+            txt += f"\n  Rejected rows: {counts}"
         for warning in result.warnings or []:
             txt += f"\n  ⚠ {warning}"
         return txt
