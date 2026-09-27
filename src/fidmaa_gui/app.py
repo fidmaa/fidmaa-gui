@@ -58,6 +58,8 @@ from . import const, errors
 from .calculations import findPoint, lower_jaw_x_bounds, neck_to_jaw_width_ratio
 from .depth_visualization import (
     DepthDisplayMode,
+    boost_matte,
+    matte_display_high,
     render_depth_contour_overlay,
     render_depth_visualization,
 )
@@ -407,6 +409,15 @@ class MainWindow(UILoaderMixin, QMainWindow):
             depth_menu.addAction(action)
             self.depthDisplayActions[mode] = action
         self.depthDisplayActions[DepthDisplayMode.COLOR].setChecked(True)
+
+        self.boostTeethMapAction = self.viewMenu.addAction("Boost teeth map (display only)")
+        self.boostTeethMapAction.setCheckable(True)
+        self.boostTeethMapAction.setChecked(True)
+        self.boostTeethMapAction.setStatusTip(
+            "Brighten weak teeth-matte confidence in the zoom view; measurements use raw values"
+        )
+        # redrawZoom treats a positional argument as a pointer event.
+        self.boostTeethMapAction.toggled.connect(lambda *_: self.redrawZoom())
 
         self.depthDisplayCombo.currentIndexChanged.connect(self._depth_display_changed)
         self.depthContourStepSpin.valueChanged.connect(self._depth_display_changed)
@@ -1432,13 +1443,16 @@ class MainWindow(UILoaderMixin, QMainWindow):
         depth_visualization=False,
         source_size=None,
         crop_box=None,
+        display_map=None,
     ):
+        """Paint a zoomed map; ``display_map`` (if given) is drawn instead of
+        ``image_map`` while the value readout still uses the raw ``image_map``."""
         w = ui_element.width()
         h = ui_element.height()
         if w < 1 or h < 1:
             return
 
-        displayed_map = image_map
+        displayed_map = image_map if display_map is None else display_map
         raw_range = None
         draw_contours = False
         if depth_visualization:
@@ -1709,6 +1723,16 @@ class MainWindow(UILoaderMixin, QMainWindow):
             crop_box=crop_box,
         )
 
+    def _teeth_display_high(self):
+        """Per-photo brightness reference for the boosted teeth map (cached)."""
+        teethmap = self.portrait.teethmap if self.portrait else None
+        if teethmap is None:
+            return None
+        cached = getattr(self, "_teeth_display_high_cache", None)
+        if cached is None or cached[0] is not teethmap:
+            self._teeth_display_high_cache = (teethmap, matte_display_high(teethmap))
+        return self._teeth_display_high_cache[1]
+
     def paintZoomedTeethmap(
         self,
         teethmap,
@@ -1723,6 +1747,11 @@ class MainWindow(UILoaderMixin, QMainWindow):
         if w < 1 or h < 1:
             return
 
+        display_map = None
+        high = self._teeth_display_high()
+        if self.boostTeethMapAction.isChecked() and high is not None:
+            display_map = boost_matte(teethmap, high)
+
         self._paintZoomedMap(
             "Teeth map",
             teethmap,
@@ -1732,6 +1761,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
             ok_value_threshold=200,
             source_size=source_size,
             crop_box=crop_box,
+            display_map=display_map,
         )
 
         if centroids is None or crop_box is None:

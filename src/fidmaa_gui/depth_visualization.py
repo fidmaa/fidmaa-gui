@@ -111,3 +111,25 @@ def _raw_level_boundaries(
     vertical = (contour_level[1:, :] != contour_level[:-1, :]) & valid[1:, :] & valid[:-1, :]
     boundaries[1:, :] |= vertical
     return boundaries
+
+
+def matte_display_high(matte: Image.Image, percentile: float = 99.5) -> float | None:
+    """Brightness reference for a confidence matte: a high percentile of its
+    non-zero values, so one photo's weak matte is stretched as a whole."""
+    values = np.asarray(matte.convert("L"))
+    values = values[values > 0]
+    if values.size == 0:
+        return None
+    return float(np.percentile(values, percentile))
+
+
+def boost_matte(matte: Image.Image, high: float, gamma: float = 0.5) -> Image.Image:
+    """Display-only brightening of a low-confidence matte.
+
+    Values are normalised to ``high`` and lifted with a gamma curve, so weak
+    regions (e.g. upper teeth at ~5% confidence) become visible. Never use the
+    result for measurements.
+    """
+    values = np.asarray(matte.convert("L"), dtype=np.float32)
+    normalised = np.clip(values / max(high, 1.0), 0.0, 1.0) ** gamma
+    return Image.fromarray((normalised * 255).round().astype(np.uint8), mode="L")

@@ -623,3 +623,31 @@ def test_region_options_are_not_squeezed_in_a_short_window(qapp):
         assert widget.height() >= widget.minimumSizeHint().height()
     assert window.regionResultEdit.height() >= 120
     window.close()
+
+
+def test_teeth_zoom_is_boosted_for_display_but_readout_stays_raw(qapp):
+    window = MainWindow()
+    window.zoomedTeethMapLabel.setFixedSize(100, 100)
+    teethmap = Image.new("L", (100, 100), 0)
+    teethmap.paste(15, (0, 0, 100, 50))  # weak "upper teeth"
+    teethmap.paste(192, (0, 50, 100, 100))
+    window.portrait = SimpleNamespace(teethmap=teethmap)
+    painted = []
+    original = window._paintZoomedMap
+
+    def spy(*args, **kwargs):
+        painted.append(kwargs.get("display_map"))
+        return original(*args, **kwargs)
+
+    window._paintZoomedMap = spy
+
+    window.paintZoomedTeethmap(teethmap, source_size=(100, 100), crop_box=(0, 0, 100, 100))
+    boosted = painted[-1]
+    assert boosted.getpixel((10, 10)) > 60
+    assert teethmap.getpixel((10, 10)) == 15  # raw map untouched
+
+    window.boostTeethMapAction.setChecked(False)
+    window.paintZoomedTeethmap(teethmap, source_size=(100, 100), crop_box=(0, 0, 100, 100))
+    assert painted[-1] is None
+    window.portrait = None
+    window.close()

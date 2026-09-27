@@ -98,3 +98,25 @@ def test_all_invalid_depth_produces_black_image_without_range():
     assert visualization.low_raw is None
     assert visualization.high_raw is None
     assert not np.asarray(visualization.image).any()
+
+
+def test_boost_matte_lifts_weak_confidence_and_keeps_zero():
+    from fidmaa_gui.depth_visualization import boost_matte, matte_display_high
+
+    matte = Image.new("L", (4, 1))
+    matte.putdata([0, 15, 100, 192])
+
+    high = matte_display_high(matte, percentile=100)
+    boosted = list(boost_matte(matte, high).getdata())
+
+    assert high == 192
+    assert boosted[0] == 0
+    assert boosted[3] == 255
+    assert boosted[1] > 60  # ~8% confidence becomes clearly visible
+    assert boosted[1] < boosted[2] < boosted[3]
+
+
+def test_matte_display_high_is_none_for_empty_matte():
+    from fidmaa_gui.depth_visualization import matte_display_high
+
+    assert matte_display_high(Image.new("L", (3, 3))) is None
