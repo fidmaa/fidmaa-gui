@@ -328,3 +328,37 @@ def test_panel_calculates_linear_and_surface_summaries(qapp):
     assert window.depthContourStepSpin.isEnabled()
     window.portrait = None
     window.close()
+
+
+def _depthmap_with_marker(size, marker, value=200):
+    depth = Image.new("RGB", size, (30, 30, 30))
+    depth.putpixel(marker, (value, value, value))
+    return depth
+
+
+def test_depth_sampling_scales_display_point_to_larger_depthmap(qapp):
+    """Depth maps are not always 480x640; sampling must not reuse display coords."""
+    window = MainWindow()
+    # 576x768 depth map: display point (240, 320) is depth pixel (288, 384).
+    window.depthmap = _depthmap_with_marker((576, 768), (288, 384))
+
+    assert window.get_depthmap_value(240, 320) == 200
+    assert window.display_to_depthmap_coordinates(240, 320) == (288, 384)
+    window.close()
+
+
+def test_zoomed_depthmap_crop_is_centred_on_scaled_point(qapp):
+    window = MainWindow()
+    window.depthmap = _depthmap_with_marker((576, 768), (288, 384))
+    calls = []
+    window.paintZoomedDepthmap = lambda zoomed, **kw: calls.append((zoomed, kw))
+    window.last_zoom_x = 240
+    window.last_zoom_y = 320
+
+    window.redrawZoom()
+
+    zoomed, kw = calls[-1]
+    assert kw["crop_box"] == (288 - 72, 384 - 48, 288 + 72, 384 + 48)
+    assert (kw["mouse_x"], kw["mouse_y"]) == (288, 384)
+    assert zoomed.getpixel((72, 48))[0] == 200
+    window.close()

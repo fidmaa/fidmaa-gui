@@ -1401,13 +1401,14 @@ class MainWindow(UILoaderMixin, QMainWindow):
             )
 
         if self.depthmap:
-            depth_crop = (mouse_x - 72, mouse_y - 48, mouse_x + 72, mouse_y + 48)
+            depth_x, depth_y = self.display_to_depthmap_coordinates(mouse_x, mouse_y)
+            depth_crop = (depth_x - 72, depth_y - 48, depth_x + 72, depth_y + 48)
             zoomed = self.depthmap.crop(depth_crop)
 
             self.paintZoomedDepthmap(
                 zoomed,
-                mouse_x=mouse_x,
-                mouse_y=mouse_y,
+                mouse_x=depth_x,
+                mouse_y=depth_y,
                 source_size=self.depthmap.size,
                 crop_box=depth_crop,
             )
@@ -1942,7 +1943,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
             self.last_click_x = mouse_x
             self.last_click_y = mouse_y
 
-            closeness = self.depthmap.getpixel((mouse_x, mouse_y))[0]
+            closeness = self.get_depthmap_value(mouse_x, mouse_y)
 
             depth_mm = self.get_depthmap_distance(closeness)
 
@@ -2108,9 +2109,23 @@ class MainWindow(UILoaderMixin, QMainWindow):
 
             self.ui.dataOutputEdit.appendPlainText(txt.strip())
 
+    def display_to_depthmap_coordinates(self, x, y):
+        """Map a 480x640 display-space point to the depth map's native resolution.
+
+        Depth maps are not always 480x640 (e.g. 576x768), so display coordinates
+        must be scaled before sampling or cropping, like every other aux map.
+        """
+        return translate_coordinates_to_other_image(
+            (x, y),
+            (const.MAIN_IMAGE_WIDTH, const.MAIN_IMAGE_HEIGHT),
+            self.depthmap.size,
+        )
+
     def get_depthmap_value(self, x, y):
-        x = int(clamp(x, 0, self.depthmap.size[0]))
-        y = int(clamp(y, 0, self.depthmap.size[1]))
+        """Raw depth value at a display-space (480x640) point."""
+        x, y = self.display_to_depthmap_coordinates(x, y)
+        x = int(clamp(x, 0, self.depthmap.size[0] - 1))
+        y = int(clamp(y, 0, self.depthmap.size[1] - 1))
         return self.depthmap.getpixel((x, y))[0]
 
     def distance_for_click(self, x, y):
