@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 from PIL import Image
 from PySide6 import QtGui
 from PySide6.QtCore import QPointF, Qt
@@ -348,6 +349,7 @@ def test_depth_sampling_scales_display_point_to_larger_depthmap(qapp):
 def test_zoomed_depthmap_crop_is_centred_on_scaled_point(qapp):
     window = MainWindow()
     window.depthmap = _depthmap_with_marker((576, 768), (288, 384))
+    window.zoomedDepthMapLabel.setFixedSize(300, 150)
     calls = []
     window.paintZoomedDepthmap = lambda zoomed, **kw: calls.append((zoomed, kw))
     window.last_zoom_x = 240
@@ -356,9 +358,26 @@ def test_zoomed_depthmap_crop_is_centred_on_scaled_point(qapp):
     window.redrawZoom()
 
     zoomed, kw = calls[-1]
-    assert kw["crop_box"] == (288 - 72, 384 - 48, 288 + 72, 384 + 48)
+    left, top, right, bottom = kw["crop_box"]
+    assert ((left + right) / 2, (top + bottom) / 2) == pytest.approx((288, 384))
     assert (kw["mouse_x"], kw["mouse_y"]) == (288, 384)
-    assert zoomed.getpixel((72, 48))[0] == 200
+    # The crop has the label's 2:1 aspect so the scaled image fills the label.
+    assert (right - left) / (bottom - top) == pytest.approx(300 / 150)
+    assert zoomed.getpixel((zoomed.width // 2, zoomed.height // 2))[0] == 200
+    window.close()
+
+
+def test_all_zoom_views_show_the_same_display_area(qapp):
+    window = MainWindow()
+    label = window.zoomedDepthMapLabel
+    label.setFixedSize(300, 150)
+
+    photo_box = window._zoom_crop_box(240, 320, (3024, 4032), label)
+    depth_box = window._zoom_crop_box(240, 320, (480, 640), label)
+
+    display_height = window.ZOOM_DISPLAY_HALF_HEIGHT * 2
+    assert (photo_box[3] - photo_box[1]) * 640 / 4032 == pytest.approx(display_height)
+    assert depth_box[3] - depth_box[1] == pytest.approx(display_height)
     window.close()
 
 

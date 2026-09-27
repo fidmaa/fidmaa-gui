@@ -1786,25 +1786,13 @@ class MainWindow(UILoaderMixin, QMainWindow):
             mouse_x = self.last_zoom_x
             mouse_y = self.last_zoom_y
 
-        img_w = const.MAIN_IMAGE_WIDTH
-        img_h = const.MAIN_IMAGE_HEIGHT
-        zoom_w = const.ZOOM_WIDTH
-        zoom_h = const.ZOOM_HEIGHT
-
-        # Crop radii — 3/4 of full zoom size for moderate zoom
-        crop_w = zoom_w * 3 // 4
-        crop_h = zoom_h * 3 // 4
-
         if self.smallImage:
-            big_image_x = mouse_x * self.image.size[0] / img_w
-            big_image_y = mouse_y * self.image.size[1] / img_h
-            photo_crop = (
-                big_image_x - crop_w,
-                big_image_y - crop_h,
-                big_image_x + crop_w,
-                big_image_y + crop_h,
+            photo_crop = self._zoom_crop_box(
+                mouse_x, mouse_y, self.image.size, self.zoomedImageLabel
             )
-            zoomed = self.image.crop(photo_crop).resize((zoom_w, zoom_h))
+            zoomed = self.image.crop(photo_crop).resize(
+                self._zoom_label_size(self.zoomedImageLabel)
+            )
             self.paintZoomedImage(
                 zoomed,
                 source_size=self.image.size,
@@ -1812,54 +1800,42 @@ class MainWindow(UILoaderMixin, QMainWindow):
             )
 
         if self.portrait and self.portrait.skinmap:
-            skinmap_x, skinmap_y = translate_coordinates_to_other_image(
-                (mouse_x, mouse_y), (img_w, img_h), (self.portrait.skinmap.size)
+            skin_size = self.portrait.skinmap.size
+            skin_crop = self._zoom_crop_box(mouse_x, mouse_y, skin_size, self.zoomedSkinMapLabel)
+            skinmap_x, skinmap_y = self._zoom_crop_center(skin_crop)
+            zoomed = self.portrait.skinmap.crop(skin_crop).resize(
+                self._zoom_label_size(self.zoomedSkinMapLabel)
             )
-            skin_crop = (
-                skinmap_x - crop_w,
-                skinmap_y - crop_h,
-                skinmap_x + crop_w,
-                skinmap_y + crop_h,
-            )
-            zoomed = self.portrait.skinmap.crop(skin_crop).resize((zoom_w, zoom_h))
             self.paintZoomedSkinmap(
                 zoomed,
                 mouse_x=skinmap_x,
                 mouse_y=skinmap_y,
-                source_size=self.portrait.skinmap.size,
+                source_size=skin_size,
                 crop_box=skin_crop,
             )
 
         if self.hairless_depth_image is not None:
-            hd_x, hd_y = translate_coordinates_to_other_image(
-                (mouse_x, mouse_y),
-                (img_w, img_h),
-                self.hairless_depth_image.size,
-            )
-            hairless_crop = (hd_x - 72, hd_y - 48, hd_x + 72, hd_y + 48)
+            hairless_size = self.hairless_depth_image.size
+            hairless_crop = self._zoom_crop_box(mouse_x, mouse_y, hairless_size, self.skinMaskLabel)
+            hd_x, hd_y = self._zoom_crop_center(hairless_crop)
             zoomed = self.hairless_depth_image.crop(hairless_crop)
             self.paintZoomedHairlessDepth(
                 zoomed,
                 mouse_x=hd_x,
                 mouse_y=hd_y,
-                source_size=self.hairless_depth_image.size,
+                source_size=hairless_size,
                 crop_box=hairless_crop,
             )
         else:
             self.paintHairlessDepthFull()
 
         if self.portrait and self.portrait.teethmap:
-            teethmap_x, teethmap_y = translate_coordinates_to_other_image(
-                (mouse_x, mouse_y), (img_w, img_h), (self.portrait.teethmap.size)
+            teeth_size = self.portrait.teethmap.size
+            teeth_crop = self._zoom_crop_box(mouse_x, mouse_y, teeth_size, self.zoomedTeethMapLabel)
+            teethmap_x, teethmap_y = self._zoom_crop_center(teeth_crop)
+            zoomed = self.portrait.teethmap.crop(teeth_crop).resize(
+                self._zoom_label_size(self.zoomedTeethMapLabel)
             )
-
-            teeth_crop = (
-                teethmap_x - crop_w,
-                teethmap_y - crop_h,
-                teethmap_x + crop_w,
-                teethmap_y + crop_h,
-            )
-            zoomed = self.portrait.teethmap.crop(teeth_crop).resize((zoom_w, zoom_h))
 
             centroids = None
             if self.ui.showCentroidsCheckBox.isChecked() and self.portrait.incisor_measurement:
@@ -1870,13 +1846,15 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 mouse_x=teethmap_x,
                 mouse_y=teethmap_y,
                 centroids=centroids,
-                source_size=self.portrait.teethmap.size,
+                source_size=teeth_size,
                 crop_box=teeth_crop,
             )
 
         if self.depthmap:
-            depth_x, depth_y = self.display_to_depthmap_coordinates(mouse_x, mouse_y)
-            depth_crop = (depth_x - 72, depth_y - 48, depth_x + 72, depth_y + 48)
+            depth_crop = self._zoom_crop_box(
+                mouse_x, mouse_y, self.depthmap.size, self.zoomedDepthMapLabel
+            )
+            depth_x, depth_y = self._zoom_crop_center(depth_crop)
             zoomed = self.depthmap.crop(depth_crop)
 
             self.paintZoomedDepthmap(
@@ -1886,6 +1864,42 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 source_size=self.depthmap.size,
                 crop_box=depth_crop,
             )
+
+    # Half-height of every zoom view, in 480x640 display pixels (smaller = more zoom).
+    ZOOM_DISPLAY_HALF_HEIGHT = 32
+
+    @staticmethod
+    def _zoom_label_size(label):
+        return max(1, label.width()), max(1, label.height())
+
+    def _zoom_crop_box(self, mouse_x, mouse_y, source_size, label):
+        """Crop box around the pointer, in ``source_size`` pixels.
+
+        The same display-space area is shown in every zoom view (so all maps
+        zoom equally), and the box has the label's aspect ratio so the scaled
+        crop fills the whole label.
+        """
+        label_w, label_h = self._zoom_label_size(label)
+        half_h = self.ZOOM_DISPLAY_HALF_HEIGHT
+        half_w = half_h * label_w / label_h
+        center_x, center_y = translate_coordinates_to_other_image(
+            (mouse_x, mouse_y),
+            (const.MAIN_IMAGE_WIDTH, const.MAIN_IMAGE_HEIGHT),
+            source_size,
+        )
+        scale_x = source_size[0] / const.MAIN_IMAGE_WIDTH
+        scale_y = source_size[1] / const.MAIN_IMAGE_HEIGHT
+        return (
+            center_x - half_w * scale_x,
+            center_y - half_h * scale_y,
+            center_x + half_w * scale_x,
+            center_y + half_h * scale_y,
+        )
+
+    @staticmethod
+    def _zoom_crop_center(crop_box):
+        left, top, right, bottom = crop_box
+        return (left + right) / 2, (top + bottom) / 2
 
     def redrawImage(self, *args, **kw):
         if not self.portrait:
