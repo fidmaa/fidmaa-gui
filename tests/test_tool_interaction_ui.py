@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 from PIL import Image
 from portrait_analyser.depth_sampling import median_filter_depthmap
+from portrait_analyser.pose import PortraitPose
 from PySide6 import QtGui
 from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtTest import QTest
@@ -235,4 +236,83 @@ def test_polyline_points_are_painted_on_the_photo(qapp):
 
     on_line = canvas.pixelColor(150, 100)
     assert on_line.red() > 200 and on_line.green() > 180 and on_line.blue() < 80
+    window.close()
+
+
+def _neutral_window():
+    window = _window_with_flat_depth()
+    # The neck-arc/centroid overlays are checked by default and paint from
+    # full NeckMeasurement/IncisorMeasurement dataclasses; these tests only
+    # exercise the automatic-results text, so keep redrawImage() (triggered
+    # indirectly by toggling mouthOpeningAction) from touching that painting
+    # code with these deliberately minimal SimpleNamespace stubs.
+    window.ui.showNeckArcCheckBox.setChecked(False)
+    window.ui.showCentroidsCheckBox.setChecked(False)
+    window.portrait = SimpleNamespace(
+        teeth_bbox=None, teethmap=None, incisor_measurement=None, skinmap=None
+    )
+    # Real NeckMidpoint objects always carry `x` (Optional[float], default
+    # None); app code guards on `neck_midpoint.x is not None`, so the stub
+    # must have the attribute even when unset.
+    window.neck_midpoint = SimpleNamespace(pose=PortraitPose.NEUTRAL_NECK, x=None)
+    window.neck_arc = SimpleNamespace(circumference_mm=364.0)
+    window.neck_measurement_auto = SimpleNamespace(circumference_mm=380.0)
+    window.neck_confidence_ratio = 0.5
+    window.mouth_measurement = None
+    window.segmentation_debug = None
+    return window
+
+
+def test_automatic_results_show_neck_and_no_tmd(qapp):
+    window = _neutral_window()
+    window._update_automatic_results()
+
+    text = window.measurementPanel.autoLabel.text()
+    assert "NEUTRAL" in text
+    assert "Neck circumference" in text
+    assert "36" in text
+    assert "Thyromental" not in text
+    assert window.measurementPanel.autoWarningLabel.isHidden()
+    assert not hasattr(window, "tmd_mm")
+    window.close()
+
+
+def test_low_confidence_skin_matte_neck_shows_warning(qapp):
+    window = _neutral_window()
+    window.neck_confidence_ratio = 5.0
+    window._update_automatic_results()
+    assert not window.measurementPanel.autoWarningLabel.isHidden()
+    window.close()
+
+
+def test_no_face_shows_force_hint(qapp):
+    window = _neutral_window()
+    window.neck_midpoint = None
+    window._update_automatic_results()
+    assert "Force extended neck analysis" in window.measurementPanel.autoWarningLabel.text()
+    window.close()
+
+
+def test_facemesh_mouth_opening_is_opt_in(qapp):
+    window = _neutral_window()
+    assert not window.mouthOpeningAction.isChecked()
+    window.neck_midpoint = SimpleNamespace(pose=PortraitPose.OPEN_MOUTH, x=None)
+    window.mouth_measurement = SimpleNamespace(distance_3d_mm=42.0)
+    # Checking the box re-runs _compute_mouth_measurement() from the FaceMesh
+    # debug data of the last detection, so the stub needs enough of that data
+    # (landmarks + depthmap + calibration) for a real (non-None) recompute.
+    window.portrait.depthmap = window.depthmap
+    window.portrait.floatValueMin = window.float_min_value
+    window.portrait.floatValueMax = window.float_max_value
+    landmarks = [(240.0, 300.0)] * 18
+    landmarks[0] = (240.0, 295.0)  # upper lip
+    landmarks[17] = (240.0, 305.0)  # lower lip
+    window.face_mesh_debug = SimpleNamespace(landmarks=landmarks)
+
+    window._update_automatic_results()
+    assert "Mouth opening" not in window.measurementPanel.autoLabel.text()
+
+    window.mouthOpeningAction.setChecked(True)
+    window._update_automatic_results()
+    assert "Mouth opening" in window.measurementPanel.autoLabel.text()
     window.close()

@@ -3,7 +3,6 @@ import os
 import signal
 import sys
 from functools import partial
-from textwrap import dedent
 
 import numpy as np
 from PIL import ImageDraw, ImageFile
@@ -30,7 +29,6 @@ from portrait_analyser.neck import (
     neck_search_bounds_from_face_landmarks,
 )
 from portrait_analyser.pose import PortraitPose, detect_neck_midpoint
-from portrait_analyser.tmd import compute_tmd_3d
 from PySide6 import QtGui
 from PySide6.QtCore import QObject, QPoint, QSettings, Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QColor
@@ -118,6 +116,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self._create_zoom_panel()
         self._create_measurement_panel()
         self._create_toolbar_and_menus()
+        self._create_analysis_menu()
 
         self.filename = None
 
@@ -131,6 +130,13 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.neck_lateral_bounds = None
         self.neck_confidence_ratio = None
         self.neck_arc = None
+        self.neck_midpoint = None
+        self.mouth_measurement = None
+        self.segmentation_debug = None
+        # _compute_mouth_measurement() reads these; it can run (via the
+        # mouth-opening opt-in toggle) before any photo has been detected.
+        self.mediapipe_debug = None
+        self.face_mesh_debug = None
 
         self.float_max_value = self.float_min_value = None
 
@@ -143,9 +149,6 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.last_show_landmarks = None
         self.last_show_segmentation = None
         self.hairless_depth_image = None
-
-        self.last_5_distances_vect = []
-        self.last_5_distances_srfc = []
 
         self.set_tool(MeasurementTool.VECTOR)
 
@@ -375,6 +378,30 @@ class MainWindow(UILoaderMixin, QMainWindow):
 
         self.depthDisplayCombo.currentIndexChanged.connect(self._depth_display_changed)
         self.depthContourStepSpin.valueChanged.connect(self._depth_display_changed)
+
+    def _create_analysis_menu(self):
+        analysis_menu = self.menuBar().addMenu("&Analysis")
+        self.forceExtendedNeckAction = analysis_menu.addAction("Force extended neck analysis")
+        self.forceExtendedNeckAction.setStatusTip(
+            "Skip MediaPipe and re-run analysis using segmentation/depth profile method"
+        )
+        self.forceExtendedNeckAction.triggered.connect(self.forceExtendedNeckAnalysis)
+        analysis_menu.addSeparator()
+        self.mouthOpeningAction = analysis_menu.addAction(
+            "Mouth opening from FaceMesh (experimental)"
+        )
+        self.mouthOpeningAction.setCheckable(True)
+        self.mouthOpeningAction.setChecked(False)
+        self.mouthOpeningAction.setStatusTip(
+            "FaceMesh lip landmarks can be wrong; only used when teeth detection fails"
+        )
+        self.mouthOpeningAction.toggled.connect(self._mouth_opening_toggled)
+
+    def _mouth_opening_toggled(self, *args):
+        if self.portrait:
+            self._compute_mouth_measurement()
+            self.redrawImage(force=True)
+        self._update_automatic_results()
 
     TOOL_HINTS = {
         MeasurementTool.VECTOR: "Click two points. Drag a point to adjust it. Esc clears.",
@@ -1913,47 +1940,6 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 painter.drawLine(int(mx) - 10, int(my), int(mx) + 10, int(my))
                 painter.drawLine(int(mx), int(my) - 10, int(mx), int(my) + 10)
 
-            # Draw chin point and TMD line (always, no checkbox)
-            if (
-                self.neck_midpoint
-                and self.neck_midpoint.x is not None
-                and self.neck_midpoint.pose
-                in (PortraitPose.EXTENDED_NECK, PortraitPose.NEUTRAL_NECK)
-            ):
-                midpoint_color = QColor(255, 0, 255, 200)
-                mx, my = translate_coordinates_to_other_image(
-                    (self.neck_midpoint.x, self.neck_midpoint.y),
-                    self.image.size,
-                    (img_w, img_h),
-                )
-                painter.setPen(Qt.NoPen)
-                painter.setBrush(midpoint_color)
-                painter.drawEllipse(QPoint(int(mx), int(my)), 5, 5)
-                pen = QtGui.QPen(midpoint_color, 2)
-                painter.setPen(pen)
-                painter.setBrush(Qt.NoBrush)
-                painter.drawLine(int(mx) - 10, int(my), int(mx) + 10, int(my))
-                painter.drawLine(int(mx), int(my) - 10, int(mx), int(my) + 10)
-
-                cx, cy = translate_coordinates_to_other_image(
-                    self.neck_midpoint.chin,
-                    self.image.size,
-                    (img_w, img_h),
-                )
-                painter.setPen(Qt.NoPen)
-                painter.setBrush(midpoint_color)
-                painter.drawEllipse(QPoint(int(cx), int(cy)), 5, 5)
-                pen = QtGui.QPen(midpoint_color, 2)
-                painter.setPen(pen)
-                painter.setBrush(Qt.NoBrush)
-                painter.drawLine(int(cx) - 10, int(cy), int(cx) + 10, int(cy))
-                painter.drawLine(int(cx), int(cy) - 10, int(cx), int(cy) + 10)
-
-                # Dashed line from chin to neck midpoint
-                dash_pen = QtGui.QPen(midpoint_color, 2, Qt.DashLine)
-                painter.setPen(dash_pen)
-                painter.drawLine(QPoint(int(cx), int(cy)), QPoint(int(mx), int(my)))
-
             if self.ui.showMediaPipeLandmarksCheckBox.isChecked() and self.mediapipe_debug:
                 landmark_color = QColor(0, 255, 0, 200)
                 painter.setPen(Qt.NoPen)
@@ -2243,261 +2229,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.ui.chartLabel.setPixmap(canvas)
 
         if self.depthmap:
-            mouse_x = clamp(mouse_x, 0, img_w)
-            mouse_y = clamp(mouse_y, 0, img_h)
-
-            if self.last_click_x is None:
-                line_len = 0
-            else:
-                line_x = abs(self.last_click_x - mouse_x)
-                line_y = abs(self.last_click_y - mouse_y)
-                line_len = self.calculate_line_length(line_x, line_y)
-
-            surface_length_3d = vector_length_3d = 0
-            filtered_surface_lengths = {step: 0.0 for step in range(2, 8)}
-            if (
-                self.last_click_x != mouse_x or self.last_click_y != mouse_y
-            ) and self.last_click_x is not None:
-                vector_length_3d = self.vector_length_between_two_clicks(
-                    mouse_x, mouse_y, self.last_click_x, self.last_click_y
-                )
-
-                surface_length_3d = self.vector_length_surface(
-                    mouse_x, mouse_y, self.last_click_x, self.last_click_y
-                )
-
-                filtered_surface_lengths = {
-                    step: self.surface_vector_filtered(
-                        mouse_x,
-                        mouse_y,
-                        self.last_click_x,
-                        self.last_click_y,
-                        step,
-                    )
-                    for step in range(2, 8)
-                }
-
             self.last_click_x = mouse_x
             self.last_click_y = mouse_y
-
-            closeness = self.get_depthmap_value(mouse_x, mouse_y)
-
-            depth_mm = self.get_depthmap_distance(closeness)
-
-            closeness_delta = 0
-            closeness_delta_mm = 0.0
-
-            if self.last_depth:
-                closeness_delta = self.last_depth - closeness
-                closeness_delta_mm = self.get_depthmap_distance(self.last_depth) - depth_mm
-
-            self.last_depth = closeness
-
-            self.last_5_distances_srfc.append(surface_length_3d)
-            if len(self.last_5_distances_srfc) > 5:
-                self.last_5_distances_srfc = self.last_5_distances_srfc[1:6]
-
-            self.last_5_distances_vect.append(vector_length_3d)
-            if len(self.last_5_distances_vect) > 5:
-                self.last_5_distances_vect = self.last_5_distances_vect[1:6]
-
-            self.ui.dataOutputEdit.clear()
-            pose_label = self.neck_midpoint.pose.value.upper() if self.neck_midpoint else "UNKNOWN"
-            txt = f"*** {pose_label} ***\n\n"
-            txt += dedent(f"""\
-            Single click:
-              Depth map coords: {mouse_x, mouse_y}
-              Depth map value: {closeness}
-              Distance from camera: {depth_mm:.2f} cm
-
-            Last two clicks:
-              Delta: {closeness_delta} pixels, {closeness_delta_mm:.1f} cm
-              Line length (2D): {line_len:.2f} px
-              Vector length (3D): {vector_length_3d / 10.0:.2f} cm
-              Surface length (3D) [legacy, unfiltered]: {(surface_length_3d / 10.0):.2f} cm
-            """)
-            # The legacy figure above walks every pixel of the raw depth map, so
-            # it rectifies 8-bit quantisation into length and reads ~10% high.
-            # Kept for comparison only -- the filtered values below are the
-            # measurement.
-            txt += "\n  Surface vector filtered (median 3x3) -- preferred:"
-            for step, length_mm in filtered_surface_lengths.items():
-                if length_mm is None:
-                    formatted_length = "n/a (invalid depth)"
-                else:
-                    formatted_length = f"{length_mm / 10.0:.2f} cm"
-                txt += f"\n    N={step} px: {formatted_length}"
-            txt += dedent(f"""
-
-                Last 5 clicks:
-                  Sum vector length (3D): {sum(self.last_5_distances_vect) / 10.0:.2f} cm
-                  Sum surface length (3D) [legacy]: {sum(self.last_5_distances_srfc) / 10.0:.2f} cm\
-                """)
-
-            # Gate measurement display by pose
-            pose = self.neck_midpoint.pose if self.neck_midpoint else None
-
-            if pose == PortraitPose.OPEN_MOUTH:
-                if self.portrait.teeth_bbox:
-                    txt += "\n\nTeeth detected."
-                    if self.portrait.incisor_distance:
-                        txt += "\nAutomatic incisor distance (legacy): "
-                        txt += "%.2f cm" % (
-                            self.vector_length_between_two_clicks(
-                                *auto_id_click_1, *auto_id_click_2
-                            )
-                            / 10.0
-                        )
-                    im = self.portrait.incisor_measurement
-                    if im and im.distance_3d_mm is not None:
-                        txt += "\nAutomatic incisor distance (centroid): "
-                        txt += "%.2f cm" % (im.distance_3d_mm / 10.0)
-                if self.mouth_measurement and self.mouth_measurement.distance_3d_mm is not None:
-                    txt += "\n\n[FaceMesh] Mouth opening: "
-                    txt += "%.2f cm" % (self.mouth_measurement.distance_3d_mm / 10.0)
-
-            elif pose == PortraitPose.NEUTRAL_NECK:
-                if self.neck_measurement_auto:
-                    nma = self.neck_measurement_auto
-                    low_confidence = (
-                        self.neck_confidence_ratio is not None
-                        and self.neck_confidence_ratio >= const.NECK_LOW_CONFIDENCE_RATIO_THRESHOLD
-                    )
-                    txt += "\n\nAutomatic neck circumference (3D arc): "
-                    txt += f"{nma.circumference_mm / 10.0:.2f} cm"
-                    if low_confidence:
-                        txt += "  ⚠ LOW CONFIDENCE"
-                    txt += f"\n  Front surface arc (3D polyline): {nma.front_arc_length_mm:.2f} mm"
-                    if nma.front_chord_length_mm is not None:
-                        txt += (
-                            "\n  Arc endpoint chord (3D Euclidean):"
-                            f" {nma.front_chord_length_mm:.2f} mm"
-                        )
-                    txt += f"\n  Multiplier: {nma.circumference_multiplier:.1f}"
-                    txt += f"\n  Arc points: {len(nma.arc_points_photo):d}"
-                    if self.neck_search_bounds is not None:
-                        txt += (
-                            "\n  Anatomical search band:"
-                            f" Y {self.neck_search_bounds[0]}–{self.neck_search_bounds[1]} px"
-                        )
-                    if self.neck_lateral_bounds is not None:
-                        txt += (
-                            "\n  FaceMesh jaw guard:"
-                            f" X {self.neck_lateral_bounds[0]}–{self.neck_lateral_bounds[1]} px"
-                        )
-                    txt += (
-                        "\n  Skin → stable depth:"
-                        f" L {nma.mask_left_x} → {nma.left_x} px,"
-                        f" R {nma.mask_right_x} → {nma.right_x} px"
-                    )
-                    if self.neck_confidence_ratio is not None:
-                        txt += (
-                            "\n  Neck/jaw width ratio:"
-                            f" {self.neck_confidence_ratio:.2f}"
-                            f" (warn at ≥ {const.NECK_LOW_CONFIDENCE_RATIO_THRESHOLD:.2f})"
-                        )
-                    if low_confidence:
-                        txt += (
-                            "\n  ⚠ No anatomical narrowing was found below the chin --"
-                            " this measurement likely includes shoulder or chest skin,"
-                            " not just the neck."
-                        )
-
-                    if self.neck_arc is not None:
-                        arc = self.neck_arc
-                        txt += "\n\n[Geometric] Neck circumference: "
-                        txt += f"{arc.circumference_mm / 10.0:.2f} cm"
-                        txt += (
-                            f"\n  Measuring line: {arc.offset_px} px below the jaw"
-                            f" (Y={arc.measuring_y})"
-                        )
-                        txt += (
-                            f"\n  Silhouette edges: X {arc.left_x} → {arc.right_x} px"
-                            f"   width {arc.raw_width_mm:.1f} mm"
-                        )
-                        txt += (
-                            f"\n  Width after erosion correction"
-                            f" (×{const.NECK_SILHOUETTE_EROSION_CORRECTION:.3f}):"
-                            f" {arc.corrected_width_mm:.1f} mm"
-                        )
-                        txt += f"\n  Visible 3D arc: {arc.front_arc_length_mm:.1f} mm"
-                        txt += (
-                            f"\n  Apex X {arc.apex_x} vs facial midline X {arc.midline_x}"
-                            f" ({arc.apex_x - arc.midline_x:+d} px)"
-                        )
-                    else:
-                        txt += (
-                            "\n\n[Geometric] Neck circumference: unavailable"
-                            " — no stable neck level found below the chin"
-                        )
-
-                    # Neck circumference approximation from diameter (left_x → right_x) * pi
-                    left_display = translate_coordinates_to_other_image(
-                        (nma.left_x, nma.neck_y),
-                        self.portrait.skinmap.size,
-                        (const.MAIN_IMAGE_WIDTH, const.MAIN_IMAGE_HEIGHT),
-                    )
-                    right_display = translate_coordinates_to_other_image(
-                        (nma.right_x, nma.neck_y),
-                        self.portrait.skinmap.size,
-                        (const.MAIN_IMAGE_WIDTH, const.MAIN_IMAGE_HEIGHT),
-                    )
-                    diameter_mm = nma.front_chord_length_mm
-                    if diameter_mm is None:
-                        diameter_mm = self.vector_length_between_two_clicks(
-                            *left_display, *right_display
-                        )
-                    circumference_from_diameter_mm = diameter_mm * math.pi
-                    txt += (
-                        "\n\nNeck approximation from Euclidean diameter × π:"
-                        f" {circumference_from_diameter_mm / 10.0:.2f} cm"
-                        f"\n  Diameter (3D): {diameter_mm / 10.0:.2f} cm"
-                    )
-                    txt += "\n  Straight-row surface vector (median depth):"
-                    for step in (2, 3, 5):
-                        surface_mm = self.surface_vector_filtered(
-                            *left_display,
-                            *right_display,
-                            step,
-                        )
-                        if surface_mm is None:
-                            txt += f"\n    N={step} px: n/a"
-                        else:
-                            txt += f"\n    N={step} px: {surface_mm / 10.0:.2f} cm"
-
-                if self.portrait.teethmap:
-                    teeth_bin = self.portrait.teethmap.point(lambda v: 255 if v > 30 else 0)
-                    bbox = teeth_bin.getbbox()
-                    if bbox:
-                        bw = bbox[2] - bbox[0]
-                        bh = bbox[3] - bbox[1]
-                        # Require a meaningful teeth region (at least 20x10 pixels)
-                        if bw >= 20 and bh >= 10:
-                            txt += (
-                                "\n\nMouth closed, neutral neck, teeth visible"
-                                " -- possible positive ULBT test?"
-                                f"\n  Teeth bbox: {bw}x{bh} px"
-                            )
-
-            elif pose == PortraitPose.EXTENDED_NECK:
-                if self.segmentation_debug and self.segmentation_debug.neck_width_front_arc_mm:
-                    txt += (
-                        f"\n\nNeck width (3D front arc):"
-                        f" {self.segmentation_debug.neck_width_front_arc_mm / 10:.2f} cm"
-                    )
-                    txt += (
-                        f"\nNeck width (3D straight):"
-                        f" {self.segmentation_debug.neck_width_straight_mm / 10:.2f} cm"
-                    )
-
-            if self.tmd_mm is not None:
-                txt += f"\n\nThyromental distance (3D): {self.tmd_mm / 10.0:.2f} cm"
-
-            # Portrait picture
-
-            # Try neck measurement
-
-            self.ui.dataOutputEdit.appendPlainText(txt.strip())
 
     def display_to_depthmap_coordinates(self, x, y):
         """Map a 480x640 display-space point to the depth map's native resolution.
@@ -2707,7 +2440,6 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.neck_midpoint = None
         self.mediapipe_debug = None
         self.face_mesh_debug = None
-        self.tmd_mm = None
         self.mouth_measurement = None
         self.segmentation_debug = None
 
@@ -2940,54 +2672,20 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 print(f"compute_neck_arc failed: {type(e).__name__}: {e}")
                 self.neck_arc = None
 
-        # Compute thyromental distance (chin -> neck midpoint)
-        if (
-            self.neck_midpoint
-            and self.portrait.depthmap
-            and self.neck_midpoint.x is not None
-            and self.neck_midpoint.pose in (PortraitPose.EXTENDED_NECK, PortraitPose.NEUTRAL_NECK)
-        ):
-            chin_x, chin_y = self.neck_midpoint.chin
-            neck_x, neck_y = self.neck_midpoint.x, self.neck_midpoint.y
-            dm_w, dm_h = self.portrait.depthmap.size
-            ph_w, ph_h = self.image.size
-            # Translate photo-space coords to depthmap-space for depth sampling
-            chin_dm = translate_coordinates_to_other_image(
-                (chin_x, chin_y), (ph_w, ph_h), (dm_w, dm_h)
-            )
-            neck_dm = translate_coordinates_to_other_image(
-                (neck_x, neck_y), (ph_w, ph_h), (dm_w, dm_h)
-            )
-            chin_depth = self.portrait.depthmap.getpixel(
-                (
-                    int(clamp(chin_dm[0], 0, dm_w - 1)),
-                    int(clamp(chin_dm[1], 0, dm_h - 1)),
-                )
-            )[0]
-            neck_depth = self.portrait.depthmap.getpixel(
-                (
-                    int(clamp(neck_dm[0], 0, dm_w - 1)),
-                    int(clamp(neck_dm[1], 0, dm_h - 1)),
-                )
-            )[0]
-            tmd_result = compute_tmd_3d(
-                chin_coord=(chin_x, chin_y),
-                neck_coord=(neck_x, neck_y),
-                chin_depth_raw=chin_depth,
-                neck_depth_raw=neck_depth,
-                float_min=self.portrait.floatValueMin,
-                float_max=self.portrait.floatValueMax,
-                image_width=ph_w,
-                image_height=ph_h,
-            )
-            if tmd_result:
-                self.tmd_mm = tmd_result[0]
-                print(f"TMD (3D): {self.tmd_mm / 10:.2f} cm")
-            else:
-                print("TMD computation failed (depth unavailable)")
+        self._compute_mouth_measurement()
 
-        # FaceMesh mouth opening fallback: when pose is OPEN_MOUTH but
-        # teethmap-based incisor detection failed (e.g. no upper teeth)
+        self.last_click_y = self.last_click_x = None
+        self.last_clicks = []
+        self.redrawImage()
+        self._update_automatic_results()
+        self.ui.dataOutputEdit.setPlainText(self._diagnostics_text())
+        self.updateWindowTitle()
+
+    def _compute_mouth_measurement(self):
+        """FaceMesh mouth opening fallback, only when the user opted in."""
+        self.mouth_measurement = None
+        if not self.mouthOpeningAction.isChecked():
+            return
         if (
             self.neck_midpoint
             and self.neck_midpoint.pose == PortraitPose.OPEN_MOUTH
@@ -3003,18 +2701,223 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 float_min=self.portrait.floatValueMin,
                 float_max=self.portrait.floatValueMax,
             )
-            if self.mouth_measurement and self.mouth_measurement.distance_3d_mm is not None:
-                print(
-                    f"FaceMesh mouth opening (3D): "
-                    f"{self.mouth_measurement.distance_3d_mm / 10:.2f} cm"
-                )
-            else:
+            if self.mouth_measurement is None or self.mouth_measurement.distance_3d_mm is None:
                 print("FaceMesh mouth measurement: depth conversion failed")
 
-        self.last_click_y = self.last_click_x = None
-        self.last_clicks = []
-        self.redrawImage()
-        self.updateWindowTitle()
+    def _update_automatic_results(self):
+        pose = self.neck_midpoint.pose if self.neck_midpoint else None
+        if self.portrait is None and pose is None and self.filename is None:
+            self.measurementPanel.set_automatic_results(
+                ["Open a photo to run the automatic analysis."], None
+            )
+            return
+        if pose is None:
+            self.measurementPanel.set_automatic_results(
+                ["Pose: not detected"],
+                "Face not detected. Try Analysis → Force extended neck analysis.",
+            )
+            return
+
+        lines = [f"Pose: {pose.value.upper()}"]
+        warning = None
+        if pose == PortraitPose.NEUTRAL_NECK:
+            if self.neck_arc is not None:
+                lines.append(f"Neck circumference: {format_cm(self.neck_arc.circumference_mm)}")
+            else:
+                lines.append("Neck circumference: unavailable (no stable neck level)")
+            if self.neck_measurement_auto is not None:
+                lines.append(
+                    "Neck (skin-matte arc): "
+                    f"{format_cm(self.neck_measurement_auto.circumference_mm)}"
+                )
+                if (
+                    self.neck_confidence_ratio is not None
+                    and self.neck_confidence_ratio >= const.NECK_LOW_CONFIDENCE_RATIO_THRESHOLD
+                ):
+                    warning = (
+                        "Skin-matte neck arc: low confidence (may include shoulder/chest skin)."
+                    )
+        elif pose == PortraitPose.OPEN_MOUTH:
+            incisor = self.portrait.incisor_measurement if self.portrait else None
+            if incisor is not None and incisor.distance_3d_mm is not None:
+                lines.append(f"Incisor distance: {format_cm(incisor.distance_3d_mm)}")
+            else:
+                lines.append("Incisor distance: teeth not detected")
+            if (
+                self.mouthOpeningAction.isChecked()
+                and self.mouth_measurement is not None
+                and self.mouth_measurement.distance_3d_mm is not None
+            ):
+                lines.append(
+                    "Mouth opening (FaceMesh, experimental): "
+                    f"{format_cm(self.mouth_measurement.distance_3d_mm)}"
+                )
+        elif pose == PortraitPose.EXTENDED_NECK:
+            sd = self.segmentation_debug
+            if sd is not None and sd.neck_width_front_arc_mm:
+                lines.append(f"Neck width (3D front arc): {format_cm(sd.neck_width_front_arc_mm)}")
+                lines.append(f"Neck width (3D straight): {format_cm(sd.neck_width_straight_mm)}")
+        self.measurementPanel.set_automatic_results(lines, warning)
+
+    def _diagnostics_text(self):
+        pose = self.neck_midpoint.pose if self.neck_midpoint else None
+        txt = f"*** {pose.value.upper() if pose else 'UNKNOWN'} ***"
+        if pose == PortraitPose.OPEN_MOUTH:
+            if self.portrait.teeth_bbox:
+                txt += "\n\nTeeth detected."
+                if self.portrait.incisor_distance:
+                    img_size = (const.MAIN_IMAGE_WIDTH, const.MAIN_IMAGE_HEIGHT)
+                    teeth_size = self.portrait.teethmap.size
+                    start = translate_coordinates_to_other_image(
+                        self.portrait.incisor_distance[:2], teeth_size, img_size
+                    )
+                    end = translate_coordinates_to_other_image(
+                        self.portrait.incisor_distance[2:4], teeth_size, img_size
+                    )
+                    txt += "\nAutomatic incisor distance (legacy): "
+                    txt += "%.2f cm" % (self.vector_length_between_two_clicks(*start, *end) / 10.0)
+                im = self.portrait.incisor_measurement
+                if im and im.distance_3d_mm is not None:
+                    txt += "\nAutomatic incisor distance (centroid): "
+                    txt += "%.2f cm" % (im.distance_3d_mm / 10.0)
+            if self.mouthOpeningAction.isChecked():
+                if self.mouth_measurement and self.mouth_measurement.distance_3d_mm is not None:
+                    txt += "\n\n[FaceMesh] Mouth opening: "
+                    txt += "%.2f cm" % (self.mouth_measurement.distance_3d_mm / 10.0)
+
+        elif pose == PortraitPose.NEUTRAL_NECK:
+            if self.neck_measurement_auto:
+                nma = self.neck_measurement_auto
+                low_confidence = (
+                    self.neck_confidence_ratio is not None
+                    and self.neck_confidence_ratio >= const.NECK_LOW_CONFIDENCE_RATIO_THRESHOLD
+                )
+                txt += "\n\nAutomatic neck circumference (3D arc): "
+                txt += f"{nma.circumference_mm / 10.0:.2f} cm"
+                if low_confidence:
+                    txt += "  ⚠ LOW CONFIDENCE"
+                txt += f"\n  Front surface arc (3D polyline): {nma.front_arc_length_mm:.2f} mm"
+                if nma.front_chord_length_mm is not None:
+                    txt += (
+                        f"\n  Arc endpoint chord (3D Euclidean): {nma.front_chord_length_mm:.2f} mm"
+                    )
+                txt += f"\n  Multiplier: {nma.circumference_multiplier:.1f}"
+                txt += f"\n  Arc points: {len(nma.arc_points_photo):d}"
+                if self.neck_search_bounds is not None:
+                    txt += (
+                        "\n  Anatomical search band:"
+                        f" Y {self.neck_search_bounds[0]}–{self.neck_search_bounds[1]} px"
+                    )
+                if self.neck_lateral_bounds is not None:
+                    txt += (
+                        "\n  FaceMesh jaw guard:"
+                        f" X {self.neck_lateral_bounds[0]}–{self.neck_lateral_bounds[1]} px"
+                    )
+                txt += (
+                    "\n  Skin → stable depth:"
+                    f" L {nma.mask_left_x} → {nma.left_x} px,"
+                    f" R {nma.mask_right_x} → {nma.right_x} px"
+                )
+                if self.neck_confidence_ratio is not None:
+                    txt += (
+                        "\n  Neck/jaw width ratio:"
+                        f" {self.neck_confidence_ratio:.2f}"
+                        f" (warn at ≥ {const.NECK_LOW_CONFIDENCE_RATIO_THRESHOLD:.2f})"
+                    )
+                if low_confidence:
+                    txt += (
+                        "\n  ⚠ No anatomical narrowing was found below the chin --"
+                        " this measurement likely includes shoulder or chest skin,"
+                        " not just the neck."
+                    )
+
+                if self.neck_arc is not None:
+                    arc = self.neck_arc
+                    txt += "\n\n[Geometric] Neck circumference: "
+                    txt += f"{arc.circumference_mm / 10.0:.2f} cm"
+                    txt += (
+                        f"\n  Measuring line: {arc.offset_px} px below the jaw"
+                        f" (Y={arc.measuring_y})"
+                    )
+                    txt += (
+                        f"\n  Silhouette edges: X {arc.left_x} → {arc.right_x} px"
+                        f"   width {arc.raw_width_mm:.1f} mm"
+                    )
+                    txt += (
+                        f"\n  Width after erosion correction"
+                        f" (×{const.NECK_SILHOUETTE_EROSION_CORRECTION:.3f}):"
+                        f" {arc.corrected_width_mm:.1f} mm"
+                    )
+                    txt += f"\n  Visible 3D arc: {arc.front_arc_length_mm:.1f} mm"
+                    txt += (
+                        f"\n  Apex X {arc.apex_x} vs facial midline X {arc.midline_x}"
+                        f" ({arc.apex_x - arc.midline_x:+d} px)"
+                    )
+                else:
+                    txt += (
+                        "\n\n[Geometric] Neck circumference: unavailable"
+                        " — no stable neck level found below the chin"
+                    )
+
+                # Neck circumference approximation from diameter (left_x → right_x) * pi
+                left_display = translate_coordinates_to_other_image(
+                    (nma.left_x, nma.neck_y),
+                    self.portrait.skinmap.size,
+                    (const.MAIN_IMAGE_WIDTH, const.MAIN_IMAGE_HEIGHT),
+                )
+                right_display = translate_coordinates_to_other_image(
+                    (nma.right_x, nma.neck_y),
+                    self.portrait.skinmap.size,
+                    (const.MAIN_IMAGE_WIDTH, const.MAIN_IMAGE_HEIGHT),
+                )
+                diameter_mm = nma.front_chord_length_mm
+                if diameter_mm is None:
+                    diameter_mm = self.vector_length_between_two_clicks(
+                        *left_display, *right_display
+                    )
+                circumference_from_diameter_mm = diameter_mm * math.pi
+                txt += (
+                    "\n\nNeck approximation from Euclidean diameter × π:"
+                    f" {circumference_from_diameter_mm / 10.0:.2f} cm"
+                    f"\n  Diameter (3D): {diameter_mm / 10.0:.2f} cm"
+                )
+                txt += "\n  Straight-row surface vector (median depth):"
+                for step in (2, 3, 5):
+                    surface_mm = self.surface_vector_filtered(
+                        *left_display,
+                        *right_display,
+                        step,
+                    )
+                    if surface_mm is None:
+                        txt += f"\n    N={step} px: n/a"
+                    else:
+                        txt += f"\n    N={step} px: {surface_mm / 10.0:.2f} cm"
+
+            if self.portrait.teethmap:
+                teeth_bin = self.portrait.teethmap.point(lambda v: 255 if v > 30 else 0)
+                bbox = teeth_bin.getbbox()
+                if bbox:
+                    bw = bbox[2] - bbox[0]
+                    bh = bbox[3] - bbox[1]
+                    # Require a meaningful teeth region (at least 20x10 pixels)
+                    if bw >= 20 and bh >= 10:
+                        txt += (
+                            "\n\nMouth closed, neutral neck, teeth visible"
+                            " -- possible positive ULBT test?"
+                            f"\n  Teeth bbox: {bw}x{bh} px"
+                        )
+
+        elif pose == PortraitPose.EXTENDED_NECK:
+            if self.segmentation_debug and self.segmentation_debug.neck_width_front_arc_mm:
+                txt += (
+                    f"\n\nNeck width (3D front arc):"
+                    f" {self.segmentation_debug.neck_width_front_arc_mm / 10:.2f} cm"
+                )
+                txt += (
+                    f"\nNeck width (3D straight):"
+                    f" {self.segmentation_debug.neck_width_straight_mm / 10:.2f} cm"
+                )
+        return txt.strip()
 
     def forceExtendedNeckAnalysis(self):
         """Re-run detection using only segmentation/depth method, skipping MediaPipe."""
