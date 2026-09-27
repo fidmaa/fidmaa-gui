@@ -334,3 +334,51 @@ def test_legacy_depth_profile_ui_is_hidden_by_default_and_toggleable(qapp):
     window.depthProfileAction.setChecked(False)
     assert all(widget.isHidden() for widget in legacy)
     window.close()
+
+
+def _face_mesh_window():
+    window = MainWindow()
+    window.image = Image.new("RGB", (960, 1280))
+    window.face_mesh_debug = SimpleNamespace(landmarks=[(480.0, 640.0)])  # display (240, 320)
+    window.ui.showFaceMeshLandmarksCheckBox.setEnabled(True)
+    return window
+
+
+def _paint_zoom(window):
+    canvas = QtGui.QImage(160, 160, QtGui.QImage.Format_RGB32)
+    canvas.fill(Qt.black)
+    painter = QtGui.QPainter(canvas)
+    # 80x80 display-space crop around the landmark, source == display size
+    window._paint_zoom_region_overlay(painter, (480, 640), (200, 280, 280, 360), (0, 0, 160, 160))
+    painter.end()
+    return canvas
+
+
+def test_face_mesh_modes_sync_with_checkbox(qapp):
+    window = _face_mesh_window()
+    assert window.faceMeshModeActions["off"].isChecked()
+
+    window.faceMeshModeActions["everywhere"].trigger()
+    assert window.ui.showFaceMeshLandmarksCheckBox.isChecked()
+    assert window._face_mesh_in_zoom()
+
+    window.ui.showFaceMeshLandmarksCheckBox.setChecked(False)
+    assert window.faceMeshModeActions["off"].isChecked()
+    window.ui.showFaceMeshLandmarksCheckBox.setChecked(True)
+    assert window.faceMeshModeActions["main"].isChecked()
+    assert not window._face_mesh_in_zoom()
+    window.close()
+
+
+def test_face_mesh_is_painted_in_zoom_only_in_everywhere_mode(qapp):
+    window = _face_mesh_window()
+    window.faceMeshModeActions["main"].trigger()
+    assert _paint_zoom(window).pixelColor(80, 80).red() < 50
+
+    window.faceMeshModeActions["everywhere"].trigger()
+    canvas = _paint_zoom(window)
+    centre = canvas.pixelColor(80, 80)
+    assert centre.red() > 200 and centre.green() > 120 and centre.blue() < 80
+    # drawn at display resolution: a fixed-size dot, not an enlarged 2x2-pixel blob
+    assert canvas.pixelColor(80 + 6, 80).red() < 50
+    window.close()

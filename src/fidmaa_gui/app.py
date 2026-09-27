@@ -118,6 +118,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self._create_toolbar_and_menus()
         self._create_analysis_menu()
         self._create_advanced_menu()
+        self._create_face_mesh_menu()
 
         self.filename = None
 
@@ -415,6 +416,44 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self._set_depth_profile_visible(False)
         self.ui.dataOutputEdit.setVisible(False)
 
+    def _create_face_mesh_menu(self):
+        menu = self.viewMenu.addMenu("FaceMesh landmarks")
+        group = QActionGroup(self)
+        group.setExclusive(True)
+        self.faceMeshModeActions = {}
+        for key, text in (
+            ("off", "Off"),
+            ("main", "Main photo only"),
+            ("everywhere", "Main photo and zoom views"),
+        ):
+            action = QAction(text, self)
+            action.setCheckable(True)
+            action.triggered.connect(partial(self._face_mesh_mode_selected, key))
+            group.addAction(action)
+            menu.addAction(action)
+            self.faceMeshModeActions[key] = action
+        self.faceMeshModeActions["off"].setChecked(True)
+        self.ui.showFaceMeshLandmarksCheckBox.toggled.connect(self._face_mesh_checkbox_toggled)
+
+    def _face_mesh_mode_selected(self, key, *args):
+        self.faceMeshModeActions[key].setChecked(True)
+        self.ui.showFaceMeshLandmarksCheckBox.setChecked(key != "off")
+        self.redrawZoom()
+
+    def _face_mesh_checkbox_toggled(self, checked):
+        if not checked:
+            self.faceMeshModeActions["off"].setChecked(True)
+        elif self.faceMeshModeActions["off"].isChecked():
+            self.faceMeshModeActions["main"].setChecked(True)
+        self.redrawZoom()
+
+    def _face_mesh_in_zoom(self):
+        return (
+            self.faceMeshModeActions["everywhere"].isChecked()
+            and self.ui.showFaceMeshLandmarksCheckBox.isChecked()
+            and self.face_mesh_debug is not None
+        )
+
     def _legacy_profile_widgets(self):
         return [
             self.ui.chartLabel,
@@ -542,6 +581,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self._show_region_tool_result()
 
     POINT_GRAB_TOLERANCE = 6
+    FACE_MESH_ZOOM_COLOR = QColor(255, 165, 0, 220)
 
     @staticmethod
     def _clamped_display_point(point):
@@ -1046,6 +1086,25 @@ class MainWindow(UILoaderMixin, QMainWindow):
         finally:
             painter.restore()
 
+    def _paint_face_mesh_zoom(self, painter, display_point):
+        """Paint FaceMesh on an already scaled zoom canvas (sharp dots and labels)."""
+        main_size = (const.MAIN_IMAGE_WIDTH, const.MAIN_IMAGE_HEIGHT)
+        bounds = painter.device().rect() if painter.device() is not None else None
+        font = painter.font()
+        font.setPointSize(7)
+        painter.setFont(font)
+        for index, landmark in enumerate(self.face_mesh_debug.landmarks):
+            main_point = translate_coordinates_to_other_image(landmark, self.image.size, main_size)
+            point = display_point(main_point)
+            if bounds is not None and not bounds.contains(point):
+                continue
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(self.FACE_MESH_ZOOM_COLOR)
+            painter.drawEllipse(point, 3, 3)
+            painter.setPen(self.FACE_MESH_ZOOM_COLOR)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawText(point + QPoint(5, -3), str(index))
+
     def _create_zoom_panel(self):
         # Take the UI widget out of central and wrap it with a zoom panel below
         ui_widget = self.centralWidget()
@@ -1134,7 +1193,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
         show_polyline = self.current_tool != MeasurementTool.REGION and bool(
             self.polyline_editor.points
         )
-        if not show_regions and not show_neck and not show_polyline:
+        show_face_mesh = self._face_mesh_in_zoom()
+        if not show_regions and not show_neck and not show_polyline and not show_face_mesh:
             return
 
         def display_point(point):
@@ -1202,6 +1262,9 @@ class MainWindow(UILoaderMixin, QMainWindow):
 
             if show_polyline:
                 self._paint_polyline_overlay(painter, display_point)
+
+            if show_face_mesh:
+                self._paint_face_mesh_zoom(painter, display_point)
         finally:
             painter.restore()
 
