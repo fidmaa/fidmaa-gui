@@ -33,11 +33,10 @@ from portrait_analyser.pose import PortraitPose, detect_neck_midpoint
 from portrait_analyser.tmd import compute_tmd_3d
 from PySide6 import QtGui
 from PySide6.QtCore import QObject, QPoint, QSettings, Qt, QTimer
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QAction, QActionGroup, QColor
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
-    QDockWidget,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -49,6 +48,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSpinBox,
+    QToolBar,
     QVBoxLayout,
     QWidget,
 )
@@ -59,6 +59,12 @@ from .depth_visualization import (
     DepthDisplayMode,
     render_depth_contour_overlay,
     render_depth_visualization,
+)
+from .measurement_panel import MeasurementPanel
+from .measurement_tools import (
+    HistoryEntry,
+    MeasurementTool,
+    PolylineEditor,
 )
 from .neck_arc import compute_neck_arc
 from .region_measurement import (
@@ -102,10 +108,15 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self._region_drag_original = None
         self.last_zoom_x = 0
         self.last_zoom_y = 0
+        self.current_tool = MeasurementTool.VECTOR
+        self.polyline_editor = PolylineEditor(max_points=2)
+        self._tool_history_index = None
+        self._point_drag_index = None
+        self._suppress_next_click = False
         self.load_ui()
         self._create_zoom_panel()
-        self._create_region_measurement_panel()
-        self._create_tools_menu()
+        self._create_measurement_panel()
+        self._create_toolbar_and_menus()
 
         self.filename = None
 
@@ -135,24 +146,30 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.last_5_distances_vect = []
         self.last_5_distances_srfc = []
 
+        self.set_tool(MeasurementTool.VECTOR)
+
         self.redrawImage()
         self.redrawZoom()
 
-    def _create_region_measurement_panel(self):
-        self.regionDock = QDockWidget("Region measurement", self)
-        self.regionDock.setObjectName("regionMeasurementDock")
-        self.regionDock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+    def _create_measurement_panel(self):
+        self.measurementPanel = MeasurementPanel()
 
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(8, 8, 8, 8)
-
-        self.regionSelectionButton = QPushButton("Show measurement controls")
-        self.regionSelectionButton.setCheckable(True)
-        self.regionSelectionButton.setToolTip(
-            "Click to place each fixed-radius patch, or drag an existing patch to move it."
+        self.lineOptionsWidget = QGroupBox("Surface sampling")
+        line_form = QFormLayout(self.lineOptionsWidget)
+        self.surfaceStepSpin = QSpinBox()
+        self.surfaceStepSpin.setRange(2, 7)
+        self.surfaceStepSpin.setValue(3)
+        self.surfaceStepSpin.setSuffix(" px")
+        self.surfaceStepSpin.setToolTip(
+            "Median-filtered surface profile is sampled every N display pixels."
         )
-        layout.addWidget(self.regionSelectionButton)
+        line_form.addRow("Step:", self.surfaceStepSpin)
+        self.surfaceStepSpin.valueChanged.connect(self._update_tool_result)
+        self.measurementPanel.optionsLayout.addWidget(self.lineOptionsWidget)
+
+        self.regionOptionsWidget = QWidget()
+        layout = QVBoxLayout(self.regionOptionsWidget)
+        layout.setContentsMargins(0, 0, 0, 0)
 
         self.regionModeACombo, self.regionMaskACombo = self._create_region_options(
             layout, "Region A", SelectionMode.LOCAL_PEAK
@@ -182,29 +199,6 @@ class MainWindow(UILoaderMixin, QMainWindow):
         settings_form.addRow("Profiles:", self.regionVectorCountSpin)
         layout.addWidget(settings_group)
 
-        depth_group = QGroupBox("Depth display")
-        depth_form = QFormLayout(depth_group)
-        self.depthDisplayCombo = QComboBox()
-        for mode in DepthDisplayMode:
-            self.depthDisplayCombo.addItem(mode.value, mode)
-        self.depthDisplayCombo.setCurrentIndex(
-            self.depthDisplayCombo.findData(DepthDisplayMode.COLOR)
-        )
-        self.depthDisplayCombo.setToolTip(
-            "Display-only enhancement; measurement data is never remapped."
-        )
-        depth_form.addRow("Mode:", self.depthDisplayCombo)
-        self.depthContourStepSpin = QSpinBox()
-        self.depthContourStepSpin.setRange(1, 8)
-        self.depthContourStepSpin.setValue(4)
-        self.depthContourStepSpin.setSuffix(" levels")
-        self.depthContourStepSpin.setToolTip(
-            "Draw one contour for every N raw depth levels. Measurements are unchanged."
-        )
-        self.depthContourStepSpin.setEnabled(False)
-        depth_form.addRow("Contour step:", self.depthContourStepSpin)
-        layout.addWidget(depth_group)
-
         clear_button = QPushButton("Clear regions")
         clear_button.clicked.connect(self.clear_region_measurement)
         layout.addWidget(clear_button)
@@ -213,14 +207,14 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.regionResultEdit.setReadOnly(True)
         self.regionResultEdit.setMinimumWidth(270)
         self.regionResultEdit.setPlainText(
-            "Enable measurement controls, then click once to place A and once to place B."
+            "Click once to place region A, then once to place region B."
         )
         layout.addWidget(self.regionResultEdit, stretch=1)
+        self.measurementPanel.optionsLayout.addWidget(self.regionOptionsWidget)
 
-        self.regionDock.setWidget(panel)
-        self.addDockWidget(Qt.RightDockWidgetArea, self.regionDock)
+        column = self.ui.findChild(QVBoxLayout, "verticalLayout")
+        column.insertWidget(column.indexOf(self.ui.dataOutputEdit), self.measurementPanel)
 
-        self.regionSelectionButton.toggled.connect(self._set_region_selection_enabled)
         for widget in (
             self.regionModeACombo,
             self.regionMaskACombo,
@@ -231,8 +225,6 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.regionPercentileSpin.valueChanged.connect(self._region_settings_changed)
         self.regionVectorCountSpin.valueChanged.connect(self._region_settings_changed)
         self.regionRadiusSpin.valueChanged.connect(self._region_radius_changed)
-        self.depthDisplayCombo.currentIndexChanged.connect(self._depth_display_changed)
-        self.depthContourStepSpin.valueChanged.connect(self._depth_display_changed)
 
     def _create_region_options(self, parent_layout, title, default_mode):
         group = QGroupBox(title)
@@ -272,23 +264,51 @@ class MainWindow(UILoaderMixin, QMainWindow):
         parent_layout.addWidget(group)
         return mode_combo, mask_combo
 
-    def _create_tools_menu(self):
-        tools_menu = self.menuBar().addMenu("&Tools")
-        self.pixelToolAction = tools_menu.addAction("Pixel tool")
-        self.pixelToolAction.setShortcut(QtGui.QKeySequence(Qt.Key_P))
-        self.pixelToolAction.setShortcutContext(Qt.WindowShortcut)
-        self.pixelToolAction.setStatusTip(
-            "Hide measurement controls and return to the original single-pixel tool"
-        )
-        self.pixelToolAction.triggered.connect(self._activate_pixel_tool)
+    def _create_toolbar_and_menus(self):
+        self.toolBar = QToolBar("Tools", self)
+        self.toolBar.setObjectName("mainToolBar")
+        self.toolBar.setMovable(False)
+        self.addToolBar(Qt.TopToolBarArea, self.toolBar)
 
-        self.measurementControlsAction = tools_menu.addAction("Show measurement controls")
-        self.measurementControlsAction.setCheckable(True)
-        self.measurementControlsAction.setStatusTip(
-            "Show and directly manipulate the two measurement circles"
+        self.openAction = QAction("Open…", self)
+        self.openAction.setShortcut(QtGui.QKeySequence.Open)
+        self.openAction.triggered.connect(self.loadJPEG)
+        self.open3DAction = QAction("3D view", self)
+        self.open3DAction.triggered.connect(self.open3DView)
+
+        file_menu = self.menuBar().addMenu("&File")
+        file_menu.addAction(self.openAction)
+        file_menu.addAction(self.open3DAction)
+
+        self.toolBar.addAction(self.openAction)
+        self.toolBar.addAction(self.open3DAction)
+        self.toolBar.addSeparator()
+
+        tools_menu = self.menuBar().addMenu("&Tools")
+        self.toolActionGroup = QActionGroup(self)
+        self.toolActionGroup.setExclusive(True)
+        self.toolActions = {}
+        tool_details = (
+            (MeasurementTool.VECTOR, Qt.Key_V, "Vector: two clicks, linear and surface length"),
+            (
+                MeasurementTool.POLYLINE,
+                Qt.Key_M,
+                "Polyline: click points, finish with Enter or right-click",
+            ),
+            (MeasurementTool.REGION, Qt.Key_R, "Region: two patches A and B"),
         )
-        self.measurementControlsAction.toggled.connect(self.regionSelectionButton.setChecked)
-        self.regionSelectionButton.toggled.connect(self.measurementControlsAction.setChecked)
+        for tool, key, tip in tool_details:
+            action = QAction(tool.value, self)
+            action.setCheckable(True)
+            action.setShortcut(QtGui.QKeySequence(key))
+            action.setShortcutContext(Qt.WindowShortcut)
+            action.setStatusTip(tip)
+            action.setToolTip(tip)
+            action.triggered.connect(partial(self.set_tool, tool))
+            self.toolActionGroup.addAction(action)
+            self.toolActions[tool] = action
+            tools_menu.addAction(action)
+            self.toolBar.addAction(action)
 
         tools_menu.addSeparator()
         action_details = (
@@ -309,11 +329,118 @@ class MainWindow(UILoaderMixin, QMainWindow):
             action.triggered.connect(partial(self._activate_region_selector, mode))
             self.regionToolActions[mode] = action
 
+        self.toolBar.addSeparator()
+        self.toolBar.addWidget(QLabel(" Depth: "))
+        self.depthDisplayCombo = QComboBox()
+        for mode in DepthDisplayMode:
+            self.depthDisplayCombo.addItem(mode.value, mode)
+        self.depthDisplayCombo.setCurrentIndex(
+            self.depthDisplayCombo.findData(DepthDisplayMode.COLOR)
+        )
+        self.depthDisplayCombo.setToolTip(
+            "Display-only enhancement; measurement data is never remapped."
+        )
+        self.toolBar.addWidget(self.depthDisplayCombo)
+        self.depthContourStepSpin = QSpinBox()
+        self.depthContourStepSpin.setRange(1, 8)
+        self.depthContourStepSpin.setValue(4)
+        self.depthContourStepSpin.setSuffix(" levels")
+        self.depthContourStepSpin.setToolTip(
+            "Draw one contour for every N raw depth levels. Measurements are unchanged."
+        )
+        self.depthContourStepSpin.setEnabled(False)
+        self.toolBar.addWidget(self.depthContourStepSpin)
+
+        self.viewMenu = self.menuBar().addMenu("&View")
+        depth_menu = self.viewMenu.addMenu("Depth display")
+        depth_group = QActionGroup(self)
+        depth_group.setExclusive(True)
+        self.depthDisplayActions = {}
+        for mode in DepthDisplayMode:
+            action = QAction(mode.value, self)
+            action.setCheckable(True)
+            action.triggered.connect(
+                partial(
+                    lambda m, *args: self.depthDisplayCombo.setCurrentIndex(
+                        self.depthDisplayCombo.findData(m)
+                    ),
+                    mode,
+                )
+            )
+            depth_group.addAction(action)
+            depth_menu.addAction(action)
+            self.depthDisplayActions[mode] = action
+        self.depthDisplayActions[DepthDisplayMode.COLOR].setChecked(True)
+
+        self.depthDisplayCombo.currentIndexChanged.connect(self._depth_display_changed)
+        self.depthContourStepSpin.valueChanged.connect(self._depth_display_changed)
+
+    TOOL_HINTS = {
+        MeasurementTool.VECTOR: "Click two points. Drag a point to adjust it. Esc clears.",
+        MeasurementTool.POLYLINE: (
+            "Click points; finish with Enter or right-click. "
+            "Backspace removes the last point, Esc clears."
+        ),
+        MeasurementTool.REGION: "Click to place region A, then region B. Drag to move.",
+    }
+
+    def set_tool(self, tool, *args):
+        self.current_tool = tool
+        self.toolActions[tool].setChecked(True)
+        self.polyline_editor = PolylineEditor(
+            max_points=2 if tool == MeasurementTool.VECTOR else None
+        )
+        self._tool_history_index = None
+        self._point_drag_index = None
+        self.regionOptionsWidget.setVisible(tool == MeasurementTool.REGION)
+        self.lineOptionsWidget.setVisible(tool != MeasurementTool.REGION)
+        self._set_region_selection_enabled(tool == MeasurementTool.REGION)
+        self._update_tool_result()
+
+    def _record_history(self, tool, points, linear_mm, surface_mm):
+        entry = HistoryEntry(
+            filename=os.path.basename(self.filename) if self.filename else "",
+            tool=tool,
+            points=points,
+            linear_mm=linear_mm,
+            surface_mm=surface_mm,
+        )
+        if self._tool_history_index is None:
+            self._tool_history_index = self.measurementPanel.add_history(entry)
+        else:
+            self.measurementPanel.replace_history(self._tool_history_index, entry)
+
+    def _update_tool_result(self, *args):
+        if self.current_tool == MeasurementTool.REGION:
+            self._show_region_tool_result()
+            return
+        self.measurementPanel.set_tool_result(
+            self.current_tool.value, None, None, [], self.TOOL_HINTS[self.current_tool]
+        )
+
+    def _show_region_tool_result(self):
+        result = self.region_measurement_result
+        linear = result.linear_stats() if result is not None else None
+        surface = result.surface_stats() if result is not None else None
+        self.measurementPanel.set_tool_result(
+            MeasurementTool.REGION.value,
+            linear.mean_mm if linear is not None else None,
+            surface.mean_mm if surface is not None else None,
+            ["Mean of region profiles; details below."] if result is not None else [],
+            self.TOOL_HINTS[MeasurementTool.REGION],
+        )
+
     def keyPressEvent(self, event):
         """Keep the single-key measurement tools reliable across Qt platforms."""
-        if event.modifiers() == Qt.NoModifier:
-            if event.key() == Qt.Key_P:
-                self.pixelToolAction.trigger()
+        if event.modifiers() in (Qt.NoModifier, Qt.KeypadModifier):
+            tool_by_key = {
+                Qt.Key_V: MeasurementTool.VECTOR,
+                Qt.Key_M: MeasurementTool.POLYLINE,
+                Qt.Key_R: MeasurementTool.REGION,
+            }
+            tool = tool_by_key.get(event.key())
+            if tool is not None:
+                self.toolActions[tool].trigger()
                 event.accept()
                 return
 
@@ -330,9 +457,6 @@ class MainWindow(UILoaderMixin, QMainWindow):
 
         super().keyPressEvent(event)
 
-    def _activate_pixel_tool(self, *args):
-        self.regionSelectionButton.setChecked(False)
-
     def _activate_region_selector(self, mode, *args):
         target = self._region_target
         if target is None:
@@ -343,7 +467,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
             else:
                 target = self._last_region_target
 
-        self.regionSelectionButton.setChecked(True)
+        if self.current_tool != MeasurementTool.REGION:
+            self.set_tool(MeasurementTool.REGION)
         if target == "a":
             combo = self.regionModeACombo
         else:
@@ -532,6 +657,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
     def _depth_display_changed(self, *args):
         mode = self.depthDisplayCombo.currentData()
         self.depthContourStepSpin.setEnabled(mode == DepthDisplayMode.COLOR_CONTOURS)
+        self.depthDisplayActions[mode].setChecked(True)
         self.redrawZoom()
 
     def clear_region_measurement(self, *args, repaint=True):
@@ -539,10 +665,9 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.region_b = None
         self.region_measurement_result = None
         self._region_target = (
-            "a"
-            if hasattr(self, "regionSelectionButton") and self.regionSelectionButton.isChecked()
-            else None
+            "a" if getattr(self, "current_tool", None) == MeasurementTool.REGION else None
         )
+        self._tool_history_index = None
         self._last_region_target = "a"
         self._region_drag_action = None
         if hasattr(self, "regionResultEdit"):
@@ -640,6 +765,13 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 )
             )
         self.regionResultEdit.setPlainText("\n".join(lines))
+        self._record_history(
+            MeasurementTool.REGION,
+            2,
+            linear.mean_mm if linear is not None else None,
+            surface.mean_mm if surface is not None else None,
+        )
+        self._show_region_tool_result()
 
     def _redraw_region_overlay(self):
         if self.portrait:
@@ -2356,6 +2488,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
     def _loadImage(self, fileName):
         self.filename = fileName
         self.clear_region_measurement(repaint=False)
+        self.set_tool(self.current_tool)
 
         try:
             self.portrait: IOSPortrait = load_image(self.filename, use_exif=False)
@@ -2808,6 +2941,9 @@ class MainWindow(UILoaderMixin, QMainWindow):
 
         canvas = QtGui.QPixmap(const.DEPTH_CHART_WIDTH, const.DEPTH_CHART_HEIGHT)
         self.ui.chartLabel.setPixmap(canvas)
+
+        self.ui.loadJPEGButton.hide()
+        self.ui.open3DViewButton.hide()
 
         self.ui.loadJPEGButton.clicked.connect(self.loadJPEG)
         self.ui.open3DViewButton.clicked.connect(self.open3DView)

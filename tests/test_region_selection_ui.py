@@ -7,6 +7,7 @@ from PySide6.QtTest import QTest
 
 from fidmaa_gui.app import MainWindow
 from fidmaa_gui.depth_visualization import DepthDisplayMode
+from fidmaa_gui.measurement_tools import MeasurementTool
 from fidmaa_gui.QClickableLabel import QClickableLabel
 from fidmaa_gui.region_measurement import (
     CandidatePoint,
@@ -48,15 +49,14 @@ def test_clickable_label_separates_click_drag_and_pointer_motion(qapp):
 def test_single_click_places_a_fixed_radius_patch(qapp):
     window = MainWindow()
     window.regionRadiusSpin.setValue(30)
-    window.regionSelectionButton.setChecked(True)
+    window.set_tool(MeasurementTool.REGION)
 
     window._begin_region_drag(QPointF(100, 100))
     window._finish_region_drag(QPointF(100, 100))
 
     assert window.region_a == Region(70, 70, 130, 130)
     assert window._region_target == "a"
-    assert window.regionSelectionButton.isChecked()
-    assert window.measurementControlsAction.isChecked()
+    assert window.current_tool == MeasurementTool.REGION
     window.close()
 
 
@@ -75,13 +75,12 @@ def test_single_key_tool_shortcuts_and_tools_menu(qapp):
     QTest.keyClick(window, Qt.Key_H)
     assert window._region_target == "a"
     assert window.regionModeACombo.currentText() == SelectionMode.HIGHEST.value
-    assert window.regionSelectionButton.isChecked()
+    assert window.current_tool == MeasurementTool.REGION
 
     window.region_a = Region(10, 10, 30, 30)
-    QTest.keyClick(window, Qt.Key_P)
+    QTest.keyClick(window, Qt.Key_V)
     assert window._region_target is None
-    assert not window.regionSelectionButton.isChecked()
-    assert not window.measurementControlsAction.isChecked()
+    assert window.current_tool == MeasurementTool.VECTOR
 
     QTest.keyClick(window, Qt.Key_L)
     assert window._region_target == "b"
@@ -89,7 +88,6 @@ def test_single_key_tool_shortcuts_and_tools_menu(qapp):
 
     QTest.keyClick(window, Qt.Key_F)
     assert window.regionModeBCombo.currentText() == SelectionMode.FLATTEST.value
-    assert window.pixelToolAction.shortcut().toString().lower() == "p"
     assert window.regionToolActions[SelectionMode.HIGHEST].shortcut().toString().lower() == "h"
     assert window.regionToolActions[SelectionMode.LOCAL_PEAK].shortcut().isEmpty()
     window.close()
@@ -159,7 +157,7 @@ def test_patch_can_be_moved_and_radius_control_resizes_both_patches(qapp):
     window.regionRadiusSpin.setValue(30)
     window.region_a = Region(70, 70, 130, 130)
     window.region_b = Region(170, 170, 230, 230)
-    window.regionSelectionButton.setChecked(True)
+    window.set_tool(MeasurementTool.REGION)
 
     window._begin_region_drag(QPointF(100, 100))
     window._drag_region(QPointF(110, 110))
@@ -175,7 +173,7 @@ def test_patch_can_be_moved_and_radius_control_resizes_both_patches(qapp):
 def test_patch_hover_uses_move_and_place_cursors(qapp):
     window = MainWindow()
     window.region_a = Region(70, 70, 130, 130)
-    window.regionSelectionButton.setChecked(True)
+    window.set_tool(MeasurementTool.REGION)
 
     expected_cursors = [
         (QPointF(100, 100), Qt.CursorShape.SizeAllCursor),
@@ -193,7 +191,7 @@ def test_patch_hover_uses_move_and_place_cursors(qapp):
     assert window.ui.imageLabel.cursor().shape() == Qt.CursorShape.CrossCursor
     window._finish_region_drag(QPointF(180, 180))
 
-    window.regionSelectionButton.setChecked(False)
+    window.set_tool(MeasurementTool.VECTOR)
     window._update_region_cursor(QPointF(100, 100))
     assert window.ui.imageLabel.cursor().shape() == Qt.CursorShape.CrossCursor
     window.close()
@@ -202,7 +200,7 @@ def test_patch_hover_uses_move_and_place_cursors(qapp):
 def test_configured_radius_is_used_without_drawing_the_perimeter(qapp):
     window = MainWindow()
     window.regionRadiusSpin.setValue(50)
-    window.regionSelectionButton.setChecked(True)
+    window.set_tool(MeasurementTool.REGION)
 
     window._begin_region_drag(QPointF(100, 100))
     window._finish_region_drag(QPointF(100, 100))
@@ -219,7 +217,7 @@ def test_clicking_a_moves_a_even_when_b_was_the_previous_target(qapp):
     window.region_a = Region(70, 70, 130, 130)
     window.region_b = original_b
     window._last_region_target = "b"
-    window.regionSelectionButton.setChecked(True)
+    window.set_tool(MeasurementTool.REGION)
     assert window._region_target == "b"
 
     window._begin_region_drag(QPointF(100, 100))
@@ -238,7 +236,7 @@ def test_dragging_outside_does_not_replace_either_completed_circle(qapp):
     original_b = Region(170, 170, 230, 230)
     window.region_a = original_a
     window.region_b = original_b
-    window.regionSelectionButton.setChecked(True)
+    window.set_tool(MeasurementTool.REGION)
 
     window._begin_region_drag(QPointF(350, 350))
     window._drag_region(QPointF(390, 390))
@@ -255,7 +253,7 @@ def test_zoom_map_shows_regions_candidates_vectors_and_bottom_info(qapp):
     window.zoomedDepthMapLabel.setFixedSize(200, 100)
     window.region_a = Region(80, 78, 100, 98)
     window.region_b = Region(110, 78, 130, 98)
-    window.regionSelectionButton.setChecked(True)
+    window.set_tool(MeasurementTool.REGION)
     candidate_a = CandidatePoint(95, 88, (0.0, 0.0, 0.0), 0.0)
     candidate_b = CandidatePoint(115, 88, (0.0, 0.0, 0.0), 0.0)
     window.region_measurement_result = RegionMeasurementResult(
