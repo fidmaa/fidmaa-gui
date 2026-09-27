@@ -16,6 +16,7 @@ from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QMenu
 
+from fidmaa_gui import measurement_tools
 from fidmaa_gui.app import (
     IMPLAUSIBLE_DEPTH_DETAIL,
     NECK_TOOL_LEGACY_DETAIL,
@@ -44,7 +45,7 @@ def _ok_result(**overrides):
         left_x=1008.0,
         right_x=2016.0,
         width_mm=134.5,
-        circumference_pi_w_mm=422.5,
+        circumference_circle_mm=422.5,
         circumference_ellipse_mm=(391.4, 402.3),
         left_depth_cm=38.2,
         right_depth_cm=38.6,
@@ -54,6 +55,12 @@ def _ok_result(**overrides):
         band=(2100.0, 2600.0),
         band_source="vision-neck",
         rows=[],
+        quality="good",
+        quality_reasons=[],
+        support_mm=9.0,
+        height_below_chin_mm=12.0,
+        roll_deg=1.5,
+        neck_roll_deg=-2.0,
     )
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -98,7 +105,9 @@ def test_panel_shows_width_and_circumference_for_capture_app_photo(qapp):
         f"{format_neck_circumference((391.4, 402.3), 422.5)}"
     )
     assert expected in text.splitlines()
-    assert "(ellipse)" in expected and "(π·W)" in expected and "≤" in expected
+    assert "(ellipse)" in expected and "(circle)" in expected
+    assert "≤" not in text and "π·W" not in text
+    assert f"measured {format_cm(12.0, 1)} below the chin · quality: good" in text
     assert "Neck circumference" not in text
     assert "skin-matte" not in text
     assert "Depth: TrueDepth absolute" in text
@@ -112,6 +121,45 @@ def test_format_neck_circumference_uses_one_decimal():
     assert text.startswith("≈ 39")
     assert "40" in text and "42" in text
     assert text.count("cm") == 2
+
+
+def test_low_quality_is_a_visible_warning_without_duplicates(qapp):
+    collar = "collar close to the neck edge (outside nearer by up to 0.3 cm)"
+    support = "clean rows span only 3.7 mm (< 5 mm)"
+    window = _neutral_float_window(
+        _ok_result(quality="low", quality_reasons=[collar, support], warnings=[collar])
+    )
+    window._update_automatic_results()
+
+    label = window.measurementPanel.autoWarningLabel
+    assert not label.isHidden()
+    assert f"Neck width quality: low — {collar}; {support}" in label.text()
+    assert label.text().count("collar close") == 1
+    assert "quality: low" in window.measurementPanel.autoLabel.text()
+    window.close()
+
+
+@pytest.mark.parametrize(
+    "status, message, focal, expected",
+    [
+        ("relative-depth", "depth accuracy is 'relative'", None, "needs absolute TrueDepth"),
+        ("no-camera", "no intrinsics -- pass camera=", None, "No camera calibration data"),
+        ("no-camera", "the file's intrinsics are not usable", 2770.0, "not usable here"),
+        ("error", "neck width measurement failed: RuntimeError: x", None, "Neck width measurement"),
+        ("no-depth", "the portrait has no depth map", None, "The portrait has no depth map"),
+    ],
+)
+def test_panel_messages_for_new_statuses(qapp, status, message, focal, expected):
+    window = _neutral_float_window(_failed_result(status, message))
+    window.portrait.focal_length_px = focal
+    window._update_automatic_results()
+
+    text = window.measurementPanel.autoLabel.text()
+    assert "Neck width: n/a — " in text
+    assert expected in text
+    assert "camera=" not in text
+    assert "Neck tool" not in text
+    window.close()
 
 
 def test_panel_shows_neck_width_warnings(qapp):
@@ -334,9 +382,56 @@ def test_neck_tool_two_clicks_measure_in_photo_pixels_and_add_history(qapp, monk
     assert entry.tool == MeasurementTool.NECK
     assert entry.points == 2
     assert entry.linear_mm == 134.5
-    assert entry.surface_mm is None
+    # Surface column: midpoint of the ellipse circumference range.
+    assert entry.surface_mm == pytest.approx(0.5 * (391.4 + 402.3))
     assert panel.historyTable.item(0, 1).text() == "Neck"
-    assert panel.historyTable.item(0, 4).text() == ""
+    assert panel.historyTable.item(0, 4).text() != ""
+    assert "Neck: circumference" in panel.historyTable.horizontalHeaderItem(4).toolTip()
+    window.close()
+
+
+def test_neck_history_surface_switch_off_leaves_the_column_empty(qapp, monkeypatch):
+    monkeypatch.setattr(measurement_tools, "NECK_HISTORY_SURFACE_IS_CIRCUMFERENCE", False)
+    _record_calls(monkeypatch, _ok_result())
+    window = _float_window()
+    window.set_tool(MeasurementTool.NECK)
+    window._on_image_clicked(QPointF(160, 356))
+    window._on_image_clicked(QPointF(320, 360))
+    (entry,) = window.measurementPanel.history.entries
+    assert entry.surface_mm is None
+    window.close()
+
+
+def test_neck_tool_shows_quality(qapp, monkeypatch):
+    reason = "left/right edge depths differ by 3.5 cm (head rotated?)"
+    _record_calls(
+        monkeypatch,
+        _ok_result(
+            quality="low", quality_reasons=[reason], warnings=[reason], height_below_chin_mm=None
+        ),
+    )
+    window = _float_window()
+    window.set_tool(MeasurementTool.NECK)
+    window._on_image_clicked(QPointF(160, 356))
+    window._on_image_clicked(QPointF(320, 360))
+    details = window.measurementPanel.detailsLabel.text()
+    assert f"⚠ Neck width quality: low — {reason}" in details
+    assert details.count("head rotated?") == 1
+    assert "Quality: low" in details
+    assert "below the chin" not in details
+    window.close()
+
+
+def test_neck_tool_relative_depth_is_na(qapp, monkeypatch):
+    _record_calls(monkeypatch, _failed_result("relative-depth", "depth accuracy is 'relative'"))
+    window = _float_window()
+    window.set_tool(MeasurementTool.NECK)
+    window._on_image_clicked(QPointF(160, 356))
+    window._on_image_clicked(QPointF(320, 360))
+    panel = window.measurementPanel
+    assert panel.linearValueLabel.text() == "n/a"
+    assert "Neck width needs absolute TrueDepth depth" in panel.detailsLabel.text()
+    assert panel.history.entries == ()
     window.close()
 
 

@@ -18,12 +18,23 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .measurement_tools import HistoryEntry, MeasurementHistory, format_history_tsv
+from .measurement_tools import (
+    NECK_HISTORY_SURFACE_IS_CIRCUMFERENCE,
+    HistoryEntry,
+    MeasurementHistory,
+    format_history_tsv,
+)
 
 HISTORY_HEADERS = ("File", "Tool", "Points", "Linear [cm]", "Surface [cm]")
 
 
 DEFAULT_VALUE_LABELS = ("Linear (3D):", "Surface:")
+
+SURFACE_COLUMN_HELP = "Vector/Polyline: length along the depth surface." + (
+    " Neck: circumference, midpoint of the ellipse range (b/a 0.85–0.90 assumed)."
+    if NECK_HISTORY_SURFACE_IS_CIRCUMFERENCE
+    else " Neck: empty."
+)
 
 
 def _number(value_cm: float, decimals: int = 2) -> str:
@@ -36,18 +47,19 @@ def format_cm(value_mm: float | None, decimals: int = 2) -> str:
     return f"{_number(value_mm / 10.0, decimals)} cm"
 
 
-def format_neck_circumference(ellipse_mm, pi_w_mm) -> str:
-    """Circumference text, e.g. "≈ 39,1–40,2 cm (ellipse) · ≤ 42,2 cm (π·W)".
+def format_neck_circumference(ellipse_mm, circle_mm) -> str:
+    """Circumference text, e.g. "≈ 39,1–40,2 cm (ellipse) · 42,2 cm (circle)".
 
-    The ellipse range assumes a population b/a ratio; π·W is an upper bound.
-    Either part is left out when the library did not give it.
+    The ellipse range assumes a population b/a ratio; the circle model is
+    π·W (a model, not a bound). Either part is left out when the library did
+    not give it.
     """
     parts = []
     if ellipse_mm is not None:
         low, high = ellipse_mm
         parts.append(f"≈ {_number(low / 10.0, 1)}–{_number(high / 10.0, 1)} cm (ellipse)")
-    if pi_w_mm is not None:
-        parts.append(f"≤ {format_cm(pi_w_mm, 1)} (π·W)")
+    if circle_mm is not None:
+        parts.append(f"{format_cm(circle_mm, 1)} (circle)")
     return " · ".join(parts) if parts else "n/a"
 
 
@@ -107,6 +119,10 @@ class MeasurementPanel(QWidget):
         history_layout = QVBoxLayout(history_group)
         self.historyTable = QTableWidget(0, len(HISTORY_HEADERS))
         self.historyTable.setHorizontalHeaderLabels(HISTORY_HEADERS)
+        self.historyTable.horizontalHeaderItem(3).setToolTip(
+            "Vector/Polyline: straight 3D length. Neck: neck width."
+        )
+        self.historyTable.horizontalHeaderItem(4).setToolTip(SURFACE_COLUMN_HELP)
         self.historyTable.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.historyTable.verticalHeader().setVisible(False)
         self.historyTable.setMinimumHeight(self.HISTORY_MINIMUM_HEIGHT)

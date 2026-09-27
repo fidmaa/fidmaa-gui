@@ -23,6 +23,20 @@ class MeasurementTool(str, Enum):
     NECK = "Neck"
 
 
+# Neck tool history rows: the "Surface" column holds the circumference
+# (midpoint of the library's ellipse range) when True, and stays empty when
+# False. A single switch until the user decides which is more useful.
+NECK_HISTORY_SURFACE_IS_CIRCUMFERENCE = True
+
+
+def neck_history_surface_mm(ellipse_mm) -> float | None:
+    """Value for a Neck row's Surface column (see the switch above)."""
+    if not NECK_HISTORY_SURFACE_IS_CIRCUMFERENCE or ellipse_mm is None:
+        return None
+    low, high = ellipse_mm
+    return 0.5 * (low + high)
+
+
 @dataclass
 class PolylineEditor:
     """Points of the measurement being drawn with the vector or polyline tool.

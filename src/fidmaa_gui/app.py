@@ -85,6 +85,7 @@ from .measurement_tools import (
     MeasurementTool,
     PolylineEditor,
     measure_polyline,
+    neck_history_surface_mm,
 )
 from .neck_arc import compute_neck_arc
 from .region_measurement import (
@@ -113,25 +114,67 @@ NECK_TOOL_VALUE_LABELS = ("Width (3D):", "Circumference:")
 NECK_TOOL_HINT_SHORT = "Use the Neck tool (N): click the left and right neck edge below the jaw."
 
 
-# The library's no-camera message addresses programmers ("pass camera=").
+# The library's no-camera messages address programmers ("pass camera=").
 NECK_WIDTH_NO_CAMERA_TEXT = (
     "No camera calibration data in this file; a metric neck width needs the camera intrinsics"
 )
+NECK_WIDTH_UNUSABLE_CAMERA_TEXT = (
+    "The file's camera calibration data are not usable here (depth not absolute, "
+    "implausible or not aligned with the photo)"
+)
+NECK_WIDTH_RELATIVE_DEPTH_TEXT = "Neck width needs absolute TrueDepth depth"
+NECK_WIDTH_QUALITY_LOW = "low"
 # Statuses where clicking the edges by hand (Neck tool) can still help.
 NECK_WIDTH_TOOL_HELPS = ("edges-occluded", "no-face")
 
 
-def neck_width_message(result):
+def neck_width_message(result, portrait=None):
     """User-facing text of a NeckWidthResult's ``message``.
 
     The library writes e.g. "neck edges not visible -- take the photo ...";
-    shown as "Neck edges not visible — take the photo ...".
+    shown as "Neck edges not visible — take the photo ...". ``no-camera``
+    distinguishes missing intrinsics from intrinsics the library could not
+    use (the file has a focal length, as the library checks).
     """
-    if getattr(result, "status", None) == "no-camera":
+    status = getattr(result, "status", None)
+    if status == "no-camera":
+        if getattr(portrait, "focal_length_px", None) is not None:
+            return NECK_WIDTH_UNUSABLE_CAMERA_TEXT
         return NECK_WIDTH_NO_CAMERA_TEXT
+    if status == "relative-depth":
+        return NECK_WIDTH_RELATIVE_DEPTH_TEXT
     message = getattr(result, "message", None) or getattr(result, "status", None) or "unknown"
     message = str(message).replace(" -- ", " — ")
     return message[:1].upper() + message[1:]
+
+
+def neck_width_quality_warning(result):
+    """ "Neck width quality: low — reason; reason", or None when not low."""
+    if getattr(result, "quality", None) != NECK_WIDTH_QUALITY_LOW:
+        return None
+    reasons = getattr(result, "quality_reasons", None) or []
+    text = "Neck width quality: low"
+    if reasons:
+        text += " — " + "; ".join(reasons)
+    return text
+
+
+def neck_width_other_warnings(result):
+    """Library warnings not already listed as quality reasons."""
+    reasons = set(getattr(result, "quality_reasons", None) or [])
+    return [w for w in (getattr(result, "warnings", None) or []) if w not in reasons]
+
+
+def neck_width_position_text(result):
+    """ "measured 1,2 cm below the chin · quality: good" (parts left out when unknown)."""
+    parts = []
+    height_mm = getattr(result, "height_below_chin_mm", None)
+    if height_mm is not None:
+        parts.append(f"measured {format_cm(height_mm, 1)} below the chin")
+    quality = getattr(result, "quality", None)
+    if quality is not None:
+        parts.append(f"quality: {quality}")
+    return " · ".join(parts) if parts else None
 
 
 tr = QObject.tr
@@ -750,8 +793,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
         """Neck tool: width between the two clicked edges (neck_width_from_edges).
 
         History: one row per measurement, linear = width; the surface column
-        stays empty (a circumference is not a surface length, and π·W is only
-        an upper bound; it is derivable from the width).
+        holds the circumference (midpoint of the ellipse range) or stays empty,
+        see ``NECK_HISTORY_SURFACE_IS_CIRCUMFERENCE`` in measurement_tools.
         """
         hint = self.TOOL_HINTS[MeasurementTool.NECK]
         labels = NECK_TOOL_VALUE_LABELS
@@ -814,27 +857,37 @@ class MainWindow(UILoaderMixin, QMainWindow):
         status = getattr(result, "status", None)
         details = []
         width_mm = None
+        surface_mm = None
         if status == NECK_WIDTH_OK:
             width_mm = result.width_mm
+            surface_mm = neck_history_surface_mm(result.circumference_ellipse_mm)
             texts = (
                 format_cm(width_mm),
                 format_neck_circumference(
-                    result.circumference_ellipse_mm, result.circumference_pi_w_mm
+                    result.circumference_ellipse_mm, result.circumference_circle_mm
                 ),
             )
+            quality_warning = neck_width_quality_warning(result)
+            if quality_warning is not None:
+                details.append(f"⚠ {quality_warning}")
+            position = neck_width_position_text(result)
+            if position is not None:
+                details.append(position[:1].upper() + position[1:])
             left_cm = result.left_depth_cm
             right_cm = result.right_depth_cm
             if left_cm is not None and right_cm is not None:
                 details.append(f"Edge depth: L {left_cm:.1f} cm · R {right_cm:.1f} cm")
-            details.append("Circumference: ellipse assumes b/a 0.85–0.90; π·W is an upper bound.")
+            details.append(
+                "Circumference: ellipse assumes b/a 0.85–0.90; circle = π·W (a model, not a bound)."
+            )
         elif status in ("no-depth",):
             texts = (format_cm(None), format_cm(None))
-            details.append(neck_width_message(result))
+            details.append(neck_width_message(result, portrait))
         else:
-            # no-camera etc.: the photo cannot be measured with this tool.
-            self._neck_tool_unavailable(hint, "n/a", neck_width_message(result))
+            # no-camera, relative-depth, error: this tool cannot measure it.
+            self._neck_tool_unavailable(hint, "n/a", neck_width_message(result, portrait))
             return
-        details.extend(f"⚠ {warning}" for warning in (getattr(result, "warnings", None) or []))
+        details.extend(f"⚠ {warning}" for warning in neck_width_other_warnings(result))
         self.measurementPanel.set_tool_result(
             MeasurementTool.NECK.value,
             width_mm,
@@ -845,7 +898,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
             labels=labels,
         )
         if self.polyline_editor.finished:
-            self._record_history(MeasurementTool.NECK, len(points), width_mm, None)
+            self._record_history(MeasurementTool.NECK, len(points), width_mm, surface_mm)
 
     def _show_region_tool_result(self):
         if depth_is_implausible(getattr(self, "portrait", None)):
@@ -3385,16 +3438,20 @@ class MainWindow(UILoaderMixin, QMainWindow):
         if result is None:
             return ["Neck width: not available"], None
         if result.status != NECK_WIDTH_OK:
-            lines = [f"Neck width: n/a — {neck_width_message(result)}"]
+            lines = [f"Neck width: n/a — {neck_width_message(result, self.portrait)}"]
             if result.status in NECK_WIDTH_TOOL_HELPS:
                 lines.append(NECK_TOOL_HINT_SHORT)
             return lines, None
-        line = (
-            f"Neck width: {format_cm(result.width_mm)} · circumference "
-            f"{format_neck_circumference(result.circumference_ellipse_mm, result.circumference_pi_w_mm)}"
+        circumference = format_neck_circumference(
+            result.circumference_ellipse_mm, result.circumference_circle_mm
         )
-        warnings = [f"Neck width: {warning}" for warning in (result.warnings or [])]
-        return [line], combine_warnings(*warnings)
+        lines = [f"Neck width: {format_cm(result.width_mm)} · circumference {circumference}"]
+        position = neck_width_position_text(result)
+        if position is not None:
+            lines.append(f"  {position}")
+        warnings = [neck_width_quality_warning(result)]
+        warnings += [f"Neck width: {warning}" for warning in neck_width_other_warnings(result)]
+        return lines, combine_warnings(*warnings)
 
     def _neck_width_diagnostics(self):
         """Diagnostics block for the width-based neck result (capture-app only)."""
@@ -3406,16 +3463,30 @@ class MainWindow(UILoaderMixin, QMainWindow):
             return txt + "not available"
         txt += f"status: {result.status}"
         if result.status != NECK_WIDTH_OK:
-            txt += f"\n  {neck_width_message(result)}"
+            txt += f"\n  {neck_width_message(result, self.portrait)}"
         else:
             low, high = result.circumference_ellipse_mm
             txt += (
                 f"\n  Width (3D): {result.width_mm / 10.0:.2f} cm"
                 f"\n  Circumference: ellipse {low / 10.0:.1f}–{high / 10.0:.1f} cm"
-                f" (b/a 0.85–0.90 assumed), π·W {result.circumference_pi_w_mm / 10.0:.1f} cm"
+                f" (b/a 0.85–0.90 assumed), circle (π·W)"
+                f" {result.circumference_circle_mm / 10.0:.1f} cm"
+                f"\n  Quality: {result.quality}"
+            )
+            for reason in result.quality_reasons or []:
+                txt += f"\n    - {reason}"
+            txt += (
                 f"\n  Row Y {result.row_y:.0f} px, edges X {result.left_x:.0f} → "
                 f"{result.right_x:.0f} px"
             )
+            for label, value, unit in (
+                ("Below the chin", result.height_below_chin_mm, "mm"),
+                ("Support", result.support_mm, "mm"),
+                ("Head roll", result.roll_deg, "deg"),
+                ("Neck roll", result.neck_roll_deg, "deg"),
+            ):
+                if value is not None:
+                    txt += f"\n  {label}: {value:.1f} {unit}"
             if result.left_depth_cm is not None and result.right_depth_cm is not None:
                 txt += (
                     f"\n  Edge depth: L {result.left_depth_cm:.1f} cm,"
