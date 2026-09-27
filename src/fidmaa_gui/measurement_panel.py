@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QPushButton,
     QTableWidget,
@@ -33,11 +34,15 @@ def format_cm(value_mm: float | None) -> str:
 
 
 class MeasurementPanel(QWidget):
+    MINIMUM_WIDTH = 340
+    HISTORY_MINIMUM_HEIGHT = 220
+
     historyCleared = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.history = MeasurementHistory()
+        self.setMinimumWidth(self.MINIMUM_WIDTH)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
@@ -56,11 +61,12 @@ class MeasurementPanel(QWidget):
         self.resultGroup = QGroupBox("Vector")
         result_layout = QVBoxLayout(self.resultGroup)
         values = QFormLayout()
+        values.setRowWrapPolicy(QFormLayout.WrapLongRows)
         self.linearValueLabel = QLabel("—")
         self.surfaceValueLabel = QLabel("—")
         for label in (self.linearValueLabel, self.surfaceValueLabel):
             font = label.font()
-            font.setPointSize(font.pointSize() + 8)
+            font.setPointSize(font.pointSize() + 5)
             font.setBold(True)
             label.setFont(font)
         values.addRow("Linear (3D):", self.linearValueLabel)
@@ -84,6 +90,10 @@ class MeasurementPanel(QWidget):
         self.historyTable.setHorizontalHeaderLabels(HISTORY_HEADERS)
         self.historyTable.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.historyTable.verticalHeader().setVisible(False)
+        self.historyTable.setMinimumHeight(self.HISTORY_MINIMUM_HEIGHT)
+        header = self.historyTable.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
         history_layout.addWidget(self.historyTable)
         buttons = QHBoxLayout()
         self.copyButton = QPushButton("Copy")

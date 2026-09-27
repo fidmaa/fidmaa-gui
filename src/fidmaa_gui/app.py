@@ -1,6 +1,7 @@
 import math
 import os
 import signal
+import subprocess
 import sys
 from functools import partial
 
@@ -38,7 +39,6 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QGroupBox,
-    QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSpinBox,
+    QSplitter,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -156,6 +157,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
 
         self.redrawImage()
         self.redrawZoom()
+        self._ui_ready = True
 
     def _create_measurement_panel(self):
         self.measurementPanel = MeasurementPanel()
@@ -1132,66 +1134,54 @@ class MainWindow(UILoaderMixin, QMainWindow):
             painter.setBrush(Qt.NoBrush)
             painter.drawText(point + QPoint(5, -3), str(index))
 
+    ZOOM_COLUMN_MIN_WIDTH = 260
+
     def _create_zoom_panel(self):
-        # Take the UI widget out of central and wrap it with a zoom panel below
+        # Put the UI widget next to a right-hand column of zoom views,
+        # stacked vertically; a splitter lets the user widen the column.
         ui_widget = self.centralWidget()
-        wrapper = QWidget()
-        wrapper_layout = QVBoxLayout(wrapper)
-        wrapper_layout.setContentsMargins(0, 0, 0, 0)
-        wrapper_layout.setSpacing(0)
-        wrapper_layout.addWidget(ui_widget)
 
-        # Create the bottom zoom panel with 2 rows of always-visible labels
-        zoom_panel = QWidget()
-        zoom_panel.setFixedHeight(400)
-        zoom_panel_layout = QVBoxLayout(zoom_panel)
-        zoom_panel_layout.setContentsMargins(2, 2, 2, 2)
-        zoom_panel_layout.setSpacing(2)
+        zoom_column = QWidget()
+        zoom_column.setMinimumWidth(self.ZOOM_COLUMN_MIN_WIDTH)
+        zoom_layout = QVBoxLayout(zoom_column)
+        zoom_layout.setContentsMargins(2, 2, 2, 2)
+        zoom_layout.setSpacing(2)
 
-        # Row 1: depth map, teeth map, reconstruction
-        row1 = QHBoxLayout()
-        row1.setSpacing(2)
+        def zoom_label(text):
+            label = QLabel(text)
+            label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+            label.setMinimumHeight(80)
+            label.setStyleSheet("border:1px solid;")
+            zoom_layout.addWidget(label, stretch=1)
+            return label
 
-        self.zoomedDepthMapLabel = QLabel("Depth Map")
-        self.zoomedDepthMapLabel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
-        self.zoomedDepthMapLabel.setStyleSheet("border:1px solid;")
-        row1.addWidget(self.zoomedDepthMapLabel, stretch=1)
+        self.zoomedImageLabel = zoom_label("Photo")
+        self.zoomedDepthMapLabel = zoom_label("Depth Map")
+        self.skinMaskLabel = zoom_label("Depth (hairless)")
+        self.zoomedSkinMapLabel = zoom_label("Skin Matte")
+        self.zoomedTeethMapLabel = zoom_label("Teeth Map")
+        self.reconstructionLabel = zoom_label("Reconstruction")
 
-        self.zoomedTeethMapLabel = QLabel("Teeth Map")
-        self.zoomedTeethMapLabel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
-        self.zoomedTeethMapLabel.setStyleSheet("border:1px solid;")
-        row1.addWidget(self.zoomedTeethMapLabel, stretch=1)
+        self.zoomSplitter = QSplitter(Qt.Horizontal)
+        self.zoomSplitter.addWidget(ui_widget)
+        self.zoomSplitter.addWidget(zoom_column)
+        self.zoomSplitter.setStretchFactor(0, 0)
+        self.zoomSplitter.setStretchFactor(1, 1)
+        self.zoomSplitter.setCollapsible(0, False)
+        self.zoomSplitter.splitterMoved.connect(self._zoom_views_resized)
+        self.setCentralWidget(self.zoomSplitter)
 
-        self.reconstructionLabel = QLabel("Reconstruction")
-        self.reconstructionLabel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
-        self.reconstructionLabel.setStyleSheet("border:1px solid;")
-        row1.addWidget(self.reconstructionLabel, stretch=1)
+    def _zoom_views_resized(self, *args):
+        self.redrawZoom()
+        if self.hairless_depth_image is None:
+            self.paintHairlessDepthFull()
 
-        zoom_panel_layout.addLayout(row1)
-
-        # Row 2: photo, skin matte
-        row2 = QHBoxLayout()
-        row2.setSpacing(2)
-
-        self.zoomedImageLabel = QLabel("Photo")
-        self.zoomedImageLabel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
-        self.zoomedImageLabel.setStyleSheet("border:1px solid;")
-        row2.addWidget(self.zoomedImageLabel, stretch=1)
-
-        self.zoomedSkinMapLabel = QLabel("Skin Matte")
-        self.zoomedSkinMapLabel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
-        self.zoomedSkinMapLabel.setStyleSheet("border:1px solid;")
-        row2.addWidget(self.zoomedSkinMapLabel, stretch=1)
-
-        self.skinMaskLabel = QLabel("Depth (hairless)")
-        self.skinMaskLabel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
-        self.skinMaskLabel.setStyleSheet("border:1px solid;")
-        row2.addWidget(self.skinMaskLabel, stretch=1)
-
-        zoom_panel_layout.addLayout(row2)
-
-        wrapper_layout.addWidget(zoom_panel)
-        self.setCentralWidget(wrapper)
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Zoom views paint pixmaps at their current size; repaint after a resize.
+        # Resize events can arrive while __init__ is still building the window.
+        if getattr(self, "_ui_ready", False):
+            self._zoom_views_resized()
 
     # ------------------------------------------------------------------
     # Zoom painting methods (moved from ZoomWindow)
@@ -3144,7 +3134,21 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.redrawImage()
 
     def open3DView(self):
+        """Open the 3D view once per photo; later clicks bring it to the front.
+
+        The viewer runs in a separate process (VTK/Qt conflict on macOS). If it
+        is still open for the current photo it is raised instead of spawning a
+        second window; for a different photo the old viewer is replaced.
+        """
         import multiprocessing
+
+        process = getattr(self, "_3d_process", None)
+        if process is not None and process.is_alive():
+            if self._3d_filename == self.filename:
+                self._raise_3d_window(process.pid)
+                return
+            process.terminate()
+            process.join(timeout=2)
 
         new_depthmap = self.depthmap.convert("L")
 
@@ -3159,6 +3163,23 @@ class MainWindow(UILoaderMixin, QMainWindow):
         )
         p.start()
         self._3d_process = p
+        self._3d_filename = self.filename
+
+    @staticmethod
+    def _raise_3d_window(pid):
+        """Bring the 3D viewer process to the front (macOS only)."""
+        if sys.platform != "darwin":
+            print("3D view is already open; bring its window to the front manually.")
+            return
+        script = (
+            'tell application "System Events" to set frontmost of '
+            f"(first process whose unix id is {int(pid)}) to true"
+        )
+        result = subprocess.run(
+            ["osascript", "-e", script], capture_output=True, text=True, check=False
+        )
+        if result.returncode != 0:
+            print(f"Could not raise the 3D view window: {result.stderr.strip()}")
 
     def closeEvent(self, event):
         if hasattr(self, "_3d_process") and self._3d_process.is_alive():

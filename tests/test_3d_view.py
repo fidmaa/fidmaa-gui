@@ -68,3 +68,79 @@ class TestOpen3DViewProcessLifecycle:
             _show_3d_view(image, depthmap, 0.5, 2.0)
 
             mock_pyvista_show.assert_called_once_with(image, depthmap, 0.5, 2.0)
+
+
+class _FakeProcess:
+    started = []
+
+    def __init__(self, target=None, args=()):
+        self.pid = 1000 + len(_FakeProcess.started)
+        self.alive = False
+        self.terminated = False
+
+    def start(self):
+        self.alive = True
+        _FakeProcess.started.append(self)
+
+    def is_alive(self):
+        return self.alive
+
+    def terminate(self):
+        self.terminated = True
+        self.alive = False
+
+    def join(self, timeout=None):
+        pass
+
+
+def _window_with_photo(filename):
+    from PIL import Image
+
+    from fidmaa_gui.app import MainWindow
+
+    window = MainWindow()
+    window.image = Image.new("RGB", (480, 640))
+    window.depthmap = Image.new("RGB", (480, 640))
+    window.filename = filename
+    return window
+
+
+def test_3d_view_opens_once_and_raises_existing_window(qapp, monkeypatch):
+    import multiprocessing
+
+    from fidmaa_gui.app import MainWindow
+
+    _FakeProcess.started = []
+    raised = []
+    monkeypatch.setattr(multiprocessing, "Process", _FakeProcess)
+    monkeypatch.setattr(MainWindow, "_raise_3d_window", staticmethod(raised.append))
+    window = _window_with_photo("/tmp/a.heic")
+
+    for _ in range(3):
+        window.open3DView()
+
+    assert len(_FakeProcess.started) == 1
+    assert raised == [_FakeProcess.started[0].pid] * 2
+    window.close()
+
+
+def test_3d_view_replaces_viewer_for_another_photo_or_after_close(qapp, monkeypatch):
+    import multiprocessing
+
+    from fidmaa_gui.app import MainWindow
+
+    _FakeProcess.started = []
+    monkeypatch.setattr(multiprocessing, "Process", _FakeProcess)
+    monkeypatch.setattr(MainWindow, "_raise_3d_window", staticmethod(lambda pid: None))
+    window = _window_with_photo("/tmp/a.heic")
+
+    window.open3DView()
+    window.filename = "/tmp/b.heic"
+    window.open3DView()
+    assert len(_FakeProcess.started) == 2
+    assert _FakeProcess.started[0].terminated
+
+    _FakeProcess.started[1].alive = False  # user closed the viewer
+    window.open3DView()
+    assert len(_FakeProcess.started) == 3
+    window.close()
