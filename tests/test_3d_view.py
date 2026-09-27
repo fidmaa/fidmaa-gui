@@ -105,33 +105,26 @@ def _window_with_photo(filename):
     return window
 
 
-def test_3d_view_opens_once_and_raises_existing_window(qapp, monkeypatch):
+def test_3d_view_opens_only_one_viewer_per_photo(qapp, monkeypatch):
     import multiprocessing
 
-    from fidmaa_gui.app import MainWindow
-
     _FakeProcess.started = []
-    raised = []
     monkeypatch.setattr(multiprocessing, "Process", _FakeProcess)
-    monkeypatch.setattr(MainWindow, "_raise_3d_window", staticmethod(raised.append))
     window = _window_with_photo("/tmp/a.heic")
 
     for _ in range(3):
         window.open3DView()
 
     assert len(_FakeProcess.started) == 1
-    assert raised == [_FakeProcess.started[0].pid] * 2
+    assert not _FakeProcess.started[0].terminated
     window.close()
 
 
 def test_3d_view_replaces_viewer_for_another_photo_or_after_close(qapp, monkeypatch):
     import multiprocessing
 
-    from fidmaa_gui.app import MainWindow
-
     _FakeProcess.started = []
     monkeypatch.setattr(multiprocessing, "Process", _FakeProcess)
-    monkeypatch.setattr(MainWindow, "_raise_3d_window", staticmethod(lambda pid: None))
     window = _window_with_photo("/tmp/a.heic")
 
     window.open3DView()

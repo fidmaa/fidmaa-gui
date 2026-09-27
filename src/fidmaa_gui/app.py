@@ -1,7 +1,6 @@
 import math
 import os
 import signal
-import subprocess
 import sys
 from functools import partial
 
@@ -1168,6 +1167,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.zoomSplitter.setStretchFactor(0, 0)
         self.zoomSplitter.setStretchFactor(1, 1)
         self.zoomSplitter.setCollapsible(0, False)
+        self.zoomSplitter.setSizes([ui_widget.sizeHint().width(), self.ZOOM_COLUMN_MIN_WIDTH])
         self.zoomSplitter.splitterMoved.connect(self._zoom_views_resized)
         self.setCentralWidget(self.zoomSplitter)
 
@@ -3134,18 +3134,17 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.redrawImage()
 
     def open3DView(self):
-        """Open the 3D view once per photo; later clicks bring it to the front.
+        """Open the 3D view once per photo.
 
-        The viewer runs in a separate process (VTK/Qt conflict on macOS). If it
-        is still open for the current photo it is raised instead of spawning a
-        second window; for a different photo the old viewer is replaced.
+        The viewer runs in a separate process (VTK/Qt conflict on macOS). While
+        it is still open for the current photo, further clicks do nothing; for
+        a different photo the old viewer is replaced.
         """
         import multiprocessing
 
         process = getattr(self, "_3d_process", None)
         if process is not None and process.is_alive():
             if self._3d_filename == self.filename:
-                self._raise_3d_window(process.pid)
                 return
             process.terminate()
             process.join(timeout=2)
@@ -3164,22 +3163,6 @@ class MainWindow(UILoaderMixin, QMainWindow):
         p.start()
         self._3d_process = p
         self._3d_filename = self.filename
-
-    @staticmethod
-    def _raise_3d_window(pid):
-        """Bring the 3D viewer process to the front (macOS only)."""
-        if sys.platform != "darwin":
-            print("3D view is already open; bring its window to the front manually.")
-            return
-        script = (
-            'tell application "System Events" to set frontmost of '
-            f"(first process whose unix id is {int(pid)}) to true"
-        )
-        result = subprocess.run(
-            ["osascript", "-e", script], capture_output=True, text=True, check=False
-        )
-        if result.returncode != 0:
-            print(f"Could not raise the 3D view window: {result.stderr.strip()}")
 
     def closeEvent(self, event):
         if hasattr(self, "_3d_process") and self._3d_process.is_alive():
@@ -3226,6 +3209,10 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.ui.angleSlider.setValue(90)
 
 
+INITIAL_WINDOW_WIDTH = 1500
+INITIAL_WINDOW_HEIGHT = 860
+
+
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("FIDMAA GUI")
@@ -3247,7 +3234,14 @@ def main():
     sigint_timer.timeout.connect(lambda: None)
     sigint_timer.start(100)
 
-    screen = app.primaryScreen().geometry()
+    screen = app.primaryScreen().availableGeometry()
+    # Start wide enough that the photo, the measurement panel and the zoom
+    # column all get their preferred widths.
+    hint = mainWindow.sizeHint()
+    mainWindow.resize(
+        min(max(hint.width(), INITIAL_WINDOW_WIDTH), screen.width()),
+        min(max(hint.height(), INITIAL_WINDOW_HEIGHT), screen.height()),
+    )
     mainWindow.move(
         (screen.width() - mainWindow.width()) // 2,
         (screen.height() - mainWindow.height()) // 2,
