@@ -1963,3 +1963,174 @@ uv run ruff format src/fidmaa_gui/app.py tests/test_tool_interaction_ui.py
 git add src/fidmaa_gui/app.py tests/test_tool_interaction_ui.py
 git commit -m "Hide legacy depth-profile UI under View > Advanced"
 ```
+
+---
+
+### Task 8: FaceMesh landmarks in zoom views (drawn after scaling)
+
+User request (2026-09-27): FaceMesh points can be shown **only on the main photo** or **everywhere** (main photo + zoomed photo, skin matte, depth map, hairless depth). In zoom views the crop is scaled **first** and the landmarks are painted **afterwards** at display resolution, so points and index labels stay sharp — never paint landmarks into the source image and then enlarge it.
+
+The zoom painters (`_paintZoomedMap` for depth and hairless depth, `paintZoomedImage`, `paintZoomedSkinmap`, `paintHairlessDepthFull`) already call `_paint_zoom_region_overlay(painter, source_size, crop_box, display_rect)` on the scaled canvas; this task paints landmarks from that hook. The teeth zoom does not use the hook and is out of scope.
+
+**Files:**
+- Modify: `src/fidmaa_gui/app.py` (`_create_advanced_menu` neighbour: new `_create_face_mesh_menu`, `_paint_zoom_region_overlay`, `connect_ui`)
+- Test: `tests/test_tool_interaction_ui.py` (append)
+
+**Interfaces:**
+- Consumes: Task 4 `self.viewMenu`; existing `self.ui.showFaceMeshLandmarksCheckBox`, `self.face_mesh_debug.landmarks` (photo-space `(x, y)` list), `self.image.size`, `_zoom_display_point`.
+- Produces on `MainWindow`: `faceMeshModeActions: dict[str, QAction]` with keys `"off"`, `"main"`, `"everywhere"` (exclusive, View → FaceMesh landmarks); `_face_mesh_in_zoom() -> bool`; `_paint_face_mesh_zoom(painter, display_point) -> None`.
+- Behaviour: the existing checkbox stays the on/off switch for the main photo and is kept in sync with the menu (`off` ⇔ unchecked; choosing `main`/`everywhere` checks it; unchecking it selects `off`; checking it selects `main` unless `everywhere` was already selected). Default `off` (as today).
+
+- [ ] **Step 1: Write the failing tests** (append)
+
+```python
+def _face_mesh_window():
+    window = MainWindow()
+    window.image = Image.new("RGB", (960, 1280))
+    window.face_mesh_debug = SimpleNamespace(landmarks=[(480.0, 640.0)])  # display (240, 320)
+    window.ui.showFaceMeshLandmarksCheckBox.setEnabled(True)
+    return window
+
+
+def _paint_zoom(window):
+    canvas = QtGui.QImage(160, 160, QtGui.QImage.Format_RGB32)
+    canvas.fill(Qt.black)
+    painter = QtGui.QPainter(canvas)
+    # 80x80 display-space crop around the landmark, source == display size
+    window._paint_zoom_region_overlay(painter, (480, 640), (200, 280, 280, 360), (0, 0, 160, 160))
+    painter.end()
+    return canvas
+
+
+def test_face_mesh_modes_sync_with_checkbox(qapp):
+    window = _face_mesh_window()
+    assert window.faceMeshModeActions["off"].isChecked()
+
+    window.faceMeshModeActions["everywhere"].trigger()
+    assert window.ui.showFaceMeshLandmarksCheckBox.isChecked()
+    assert window._face_mesh_in_zoom()
+
+    window.ui.showFaceMeshLandmarksCheckBox.setChecked(False)
+    assert window.faceMeshModeActions["off"].isChecked()
+    window.ui.showFaceMeshLandmarksCheckBox.setChecked(True)
+    assert window.faceMeshModeActions["main"].isChecked()
+    assert not window._face_mesh_in_zoom()
+    window.close()
+
+
+def test_face_mesh_is_painted_in_zoom_only_in_everywhere_mode(qapp):
+    window = _face_mesh_window()
+    window.faceMeshModeActions["main"].trigger()
+    assert _paint_zoom(window).pixelColor(80, 80).red() < 50
+
+    window.faceMeshModeActions["everywhere"].trigger()
+    canvas = _paint_zoom(window)
+    centre = canvas.pixelColor(80, 80)
+    assert centre.red() > 200 and centre.green() > 120 and centre.blue() < 80
+    # drawn at display resolution: a fixed-size dot, not an enlarged 2x2-pixel blob
+    assert canvas.pixelColor(80 + 6, 80).red() < 50
+    window.close()
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `uv run pytest tests/test_tool_interaction_ui.py -v -k face_mesh`
+Expected: FAIL with `AttributeError: ... 'faceMeshModeActions'`
+
+- [ ] **Step 3: Implement in `app.py`**
+
+3a. Menu and sync (call `self._create_face_mesh_menu()` in `__init__` right after `self._create_advanced_menu()`):
+
+```python
+    def _create_face_mesh_menu(self):
+        menu = self.viewMenu.addMenu("FaceMesh landmarks")
+        group = QActionGroup(self)
+        group.setExclusive(True)
+        self.faceMeshModeActions = {}
+        for key, text in (
+            ("off", "Off"),
+            ("main", "Main photo only"),
+            ("everywhere", "Main photo and zoom views"),
+        ):
+            action = QAction(text, self)
+            action.setCheckable(True)
+            action.triggered.connect(partial(self._face_mesh_mode_selected, key))
+            group.addAction(action)
+            menu.addAction(action)
+            self.faceMeshModeActions[key] = action
+        self.faceMeshModeActions["off"].setChecked(True)
+        self.ui.showFaceMeshLandmarksCheckBox.toggled.connect(self._face_mesh_checkbox_toggled)
+
+    def _face_mesh_mode_selected(self, key, *args):
+        self.faceMeshModeActions[key].setChecked(True)
+        self.ui.showFaceMeshLandmarksCheckBox.setChecked(key != "off")
+        self.redrawZoom()
+
+    def _face_mesh_checkbox_toggled(self, checked):
+        if not checked:
+            self.faceMeshModeActions["off"].setChecked(True)
+        elif self.faceMeshModeActions["off"].isChecked():
+            self.faceMeshModeActions["main"].setChecked(True)
+        self.redrawZoom()
+
+    def _face_mesh_in_zoom(self):
+        return (
+            self.faceMeshModeActions["everywhere"].isChecked()
+            and self.ui.showFaceMeshLandmarksCheckBox.isChecked()
+            and self.face_mesh_debug is not None
+        )
+```
+
+`_run_detection_and_update` already unchecks the checkbox when FaceMesh is missing; through `_face_mesh_checkbox_toggled` that selects `off` — no extra code. Initialise `self.face_mesh_debug = None` in `__init__` next to `self.neck_arc = None` if it is not initialised there yet.
+
+3b. Painting at display resolution — add:
+
+```python
+    FACE_MESH_ZOOM_COLOR = QColor(255, 165, 0, 220)
+
+    def _paint_face_mesh_zoom(self, painter, display_point):
+        """Paint FaceMesh on an already scaled zoom canvas (sharp dots and labels)."""
+        main_size = (const.MAIN_IMAGE_WIDTH, const.MAIN_IMAGE_HEIGHT)
+        bounds = painter.device().rect() if painter.device() is not None else None
+        font = painter.font()
+        font.setPointSize(7)
+        painter.setFont(font)
+        for index, landmark in enumerate(self.face_mesh_debug.landmarks):
+            main_point = translate_coordinates_to_other_image(landmark, self.image.size, main_size)
+            point = display_point(main_point)
+            if bounds is not None and not bounds.contains(point):
+                continue
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(self.FACE_MESH_ZOOM_COLOR)
+            painter.drawEllipse(point, 3, 3)
+            painter.setPen(self.FACE_MESH_ZOOM_COLOR)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawText(point + QPoint(5, -3), str(index))
+```
+
+Label text is drawn to the upper-right of the dot, so the pixel 6 px to the right of the dot centre on the dot's row stays background (the test relies on that).
+
+3c. In `_paint_zoom_region_overlay`: compute `show_face_mesh = self._face_mesh_in_zoom()`, extend the early return to `if not show_regions and not show_neck and not show_polyline and not show_face_mesh: return`, and inside `try:` add as the **last** block (on top of everything else):
+
+```python
+            if show_face_mesh:
+                self._paint_face_mesh_zoom(painter, display_point)
+```
+
+- [ ] **Step 4: Run tests**
+
+Run: `uv run pytest -q`
+Expected: all pass
+
+- [ ] **Step 5: Manual smoke check**
+
+Run: `uv run fidmaa_gui <path to a .heic>`; View → FaceMesh landmarks → *Main photo and zoom views*; hover the lips: zoomed photo, skin matte, depth and hairless depth show sharp orange dots with readable indices. *Main photo only* removes them from the zooms. Close.
+
+- [ ] **Step 6: Lint and commit**
+
+```bash
+uv run ruff check --fix src/fidmaa_gui/app.py tests/test_tool_interaction_ui.py
+uv run ruff format src/fidmaa_gui/app.py tests/test_tool_interaction_ui.py
+git add src/fidmaa_gui/app.py tests/test_tool_interaction_ui.py
+git commit -m "Show FaceMesh landmarks in zoom views at display resolution"
+```
