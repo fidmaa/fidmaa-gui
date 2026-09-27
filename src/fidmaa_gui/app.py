@@ -430,6 +430,18 @@ class MainWindow(UILoaderMixin, QMainWindow):
             self.TOOL_HINTS[MeasurementTool.REGION],
         )
 
+    def _refresh_region_tool_result(self):
+        """Keep the panel's Region result in sync outside the calculation's success path.
+
+        No-op during __init__ (before measurementPanel exists) and whenever a
+        different tool is active, so it never steals the panel from Vector/Polyline.
+        """
+        if getattr(self, "current_tool", None) != MeasurementTool.REGION:
+            return
+        if not hasattr(self, "measurementPanel"):
+            return
+        self._show_region_tool_result()
+
     def keyPressEvent(self, event):
         """Keep the single-key measurement tools reliable across Qt platforms."""
         if event.modifiers() in (Qt.NoModifier, Qt.KeypadModifier):
@@ -674,6 +686,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
             self.regionResultEdit.setPlainText(
                 "Click once to place region A, then once to place region B."
             )
+        self._refresh_region_tool_result()
         if repaint:
             self._redraw_region_overlay()
 
@@ -685,9 +698,13 @@ class MainWindow(UILoaderMixin, QMainWindow):
             self.regionResultEdit.setPlainText(
                 f"Click once to place region {missing} and calculate a measurement."
             )
+            self.region_measurement_result = None
+            self._refresh_region_tool_result()
             return
         if self.filtered_depthmap is None or not hasattr(self, "image"):
             self.regionResultEdit.setPlainText("Load an image with depth data first.")
+            self.region_measurement_result = None
+            self._refresh_region_tool_result()
             return
 
         mode_a = SelectionMode(self.regionModeACombo.currentText())
@@ -719,6 +736,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
         except MeasurementError as error:
             self.region_measurement_result = None
             self.regionResultEdit.setPlainText(f"Cannot calculate measurement:\n{error}")
+            self._refresh_region_tool_result()
             return
 
         self.region_measurement_result = result
@@ -771,7 +789,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
             linear.mean_mm if linear is not None else None,
             surface.mean_mm if surface is not None else None,
         )
-        self._show_region_tool_result()
+        self._refresh_region_tool_result()
 
     def _redraw_region_overlay(self):
         if self.portrait:

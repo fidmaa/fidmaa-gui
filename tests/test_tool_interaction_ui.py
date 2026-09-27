@@ -1,10 +1,13 @@
+from types import SimpleNamespace
+
+from PIL import Image
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 
 from fidmaa_gui.app import MainWindow
 from fidmaa_gui.depth_visualization import DepthDisplayMode
 from fidmaa_gui.measurement_tools import MeasurementTool
-from fidmaa_gui.region_measurement import SelectionMode
+from fidmaa_gui.region_measurement import Region, SelectionMode
 
 
 def test_default_tool_is_vector_and_tools_are_exclusive(qapp):
@@ -60,4 +63,41 @@ def test_depth_display_lives_on_toolbar_and_view_menu(qapp):
         window.depthDisplayCombo.findData(DepthDisplayMode.RAW)
     )
     assert window.depthDisplayActions[DepthDisplayMode.RAW].isChecked()
+    window.close()
+
+
+def test_region_panel_result_is_refreshed_on_clear_and_failure(qapp):
+    window = MainWindow()
+    window.set_tool(MeasurementTool.REGION)
+
+    depth = Image.new("L", (480, 640), 30)
+    window.image = Image.new("RGB", (480, 640))
+    window.depthmap = depth
+    window.filtered_depthmap = depth
+    window.portrait = SimpleNamespace(teethmap=None)
+    window.float_min_value = 2.0
+    window.float_max_value = 4.0
+    window.region_a = Region(50, 50, 100, 100)
+    window.region_b = Region(50, 150, 100, 200)
+    window.regionModeBCombo.setCurrentIndex(window.regionModeBCombo.findData(SelectionMode.HIGHEST))
+
+    window._calculate_region_measurement()
+    assert window.region_measurement_result is not None
+    assert window.measurementPanel.linearValueLabel.text() != "—"
+
+    window.clear_region_measurement(repaint=False)
+    assert window.measurementPanel.linearValueLabel.text() == "—"
+
+    # Re-run a successful measurement, then force the "no depth data" early
+    # return: the panel must not keep showing the stale successful result.
+    window.region_a = Region(50, 50, 100, 100)
+    window.region_b = Region(50, 150, 100, 200)
+    window._calculate_region_measurement()
+    assert window.measurementPanel.linearValueLabel.text() != "—"
+
+    window.filtered_depthmap = None
+    window._calculate_region_measurement()
+    assert "Load an image" in window.regionResultEdit.toPlainText()
+    assert window.region_measurement_result is None
+    assert window.measurementPanel.linearValueLabel.text() == "—"
     window.close()
