@@ -2976,7 +2976,15 @@ class MainWindow(UILoaderMixin, QMainWindow):
         elif pose == PortraitPose.OPEN_MOUTH:
             incisor = self.portrait.incisor_measurement if self.portrait else None
             if incisor is not None and incisor.distance_3d_mm is not None:
-                lines.append(f"Incisor distance: {format_cm(incisor.distance_3d_mm)}")
+                line = f"Incisor distance: {format_cm(incisor.distance_3d_mm)}"
+                notes = []
+                if incisor.weak_arch:
+                    notes.append(f"weak {incisor.weak_arch} arch")
+                if incisor.depth_assumed:
+                    notes.append(f"{incisor.depth_assumed} depth taken from the other arch")
+                if notes:
+                    line += f" ({', '.join(notes)})"
+                lines.append(line)
             else:
                 lines.append("Incisor distance: teeth not detected")
             if (

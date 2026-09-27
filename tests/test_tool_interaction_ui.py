@@ -666,3 +666,23 @@ def test_vector_details_show_point_depths_and_in_plane_length(qapp):
     linear = window.measurementPanel.history.entries[0].linear_mm
     assert f"In image plane (no Δ depth): {format_cm(linear)}" in details
     window.close()
+
+
+def test_incisor_distance_flags_weak_arch_and_assumed_depth(qapp):
+    window = _neutral_window()
+    window.neck_midpoint = SimpleNamespace(pose=PortraitPose.OPEN_MOUTH, x=None)
+    window.portrait = SimpleNamespace(
+        teeth_bbox=None,
+        teethmap=None,
+        skinmap=None,
+        incisor_measurement=SimpleNamespace(
+            distance_3d_mm=430.0, weak_arch="upper", depth_assumed="upper"
+        ),
+    )
+
+    window._update_automatic_results()
+
+    text = window.measurementPanel.autoLabel.text()
+    assert "weak upper arch" in text
+    assert "upper depth taken from the other arch" in text
+    window.close()
