@@ -1,3 +1,4 @@
+import logging
 import math
 import os
 import signal
@@ -5,6 +6,7 @@ import sys
 from functools import partial
 
 import numpy as np
+import portrait_analyser
 from PIL import ImageDraw, ImageFile
 from portrait_analyser.depth_sampling import (
     measure_filtered_surface_length,
@@ -73,7 +75,11 @@ from .depth_visualization import (
     render_depth_contour_overlay,
     render_depth_visualization,
 )
-from .measurement_panel import MeasurementPanel, format_cm
+from .measurement_panel import (
+    MeasurementPanel,
+    format_cm,
+    format_neck_circumference,
+)
 from .measurement_tools import (
     HistoryEntry,
     MeasurementTool,
@@ -96,6 +102,37 @@ from .utils import (
 )
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+logger = logging.getLogger(__name__)
+
+# portrait_analyser NeckWidthResult.status on success.
+NECK_WIDTH_OK = "ok"
+NECK_TOOL_LEGACY_NA = "n/a (needs capture-app photo)"
+NECK_TOOL_LEGACY_DETAIL = "Neck tool needs a TrueDepth capture-app photo"
+NECK_TOOL_VALUE_LABELS = ("Width (3D):", "Circumference:")
+NECK_TOOL_HINT_SHORT = "Use the Neck tool (N): click the left and right neck edge below the jaw."
+
+
+# The library's no-camera message addresses programmers ("pass camera=").
+NECK_WIDTH_NO_CAMERA_TEXT = (
+    "No camera calibration data in this file; a metric neck width needs the camera intrinsics"
+)
+# Statuses where clicking the edges by hand (Neck tool) can still help.
+NECK_WIDTH_TOOL_HELPS = ("edges-occluded", "no-face")
+
+
+def neck_width_message(result):
+    """User-facing text of a NeckWidthResult's ``message``.
+
+    The library writes e.g. "neck edges not visible -- take the photo ...";
+    shown as "Neck edges not visible — take the photo ...".
+    """
+    if getattr(result, "status", None) == "no-camera":
+        return NECK_WIDTH_NO_CAMERA_TEXT
+    message = getattr(result, "message", None) or getattr(result, "status", None) or "unknown"
+    message = str(message).replace(" -- ", " — ")
+    return message[:1].upper() + message[1:]
+
 
 tr = QObject.tr
 
@@ -173,6 +210,11 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.neck_confidence_ratio = None
         self.neck_arc = None
         self.neck_midpoint = None
+        # portrait.neck_width (capture-app photos): a NeckWidthResult, or
+        # None (legacy photo / not computed); neck_width_error holds the text
+        # of an unexpected library failure shown in the panel instead.
+        self.neck_width_auto = None
+        self.neck_width_error = None
         self.mouth_measurement = None
         self.segmentation_debug = None
         # _compute_mouth_measurement() reads these; it can run (via the
@@ -369,6 +411,11 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 "Polyline: click points, finish with Enter or right-click",
             ),
             (MeasurementTool.REGION, Qt.Key_R, "Region: two patches A and B"),
+            (
+                MeasurementTool.NECK,
+                Qt.Key_N,
+                "Neck: click the left and right neck edge below the jaw (capture-app photos)",
+            ),
         )
         for tool, key, tip in tool_details:
             action = QAction(tool.value, self)
@@ -453,6 +500,14 @@ class MainWindow(UILoaderMixin, QMainWindow):
         )
         # redrawZoom treats a positional argument as a pointer event.
         self.boostTeethMapAction.toggled.connect(lambda *_: self.redrawZoom())
+
+        self.neckWidthOverlayAction = self.viewMenu.addAction("Neck width overlay")
+        self.neckWidthOverlayAction.setCheckable(True)
+        self.neckWidthOverlayAction.setChecked(True)
+        self.neckWidthOverlayAction.setStatusTip(
+            "Show the automatic neck width row and its edges (capture-app photos)"
+        )
+        self.neckWidthOverlayAction.toggled.connect(lambda *_: self._redraw_tool_overlay())
 
         self.depthDisplayCombo.currentIndexChanged.connect(self._depth_display_changed)
         self.depthContourStepSpin.valueChanged.connect(self._depth_display_changed)
@@ -557,18 +612,27 @@ class MainWindow(UILoaderMixin, QMainWindow):
             "Backspace removes the last point, Esc clears."
         ),
         MeasurementTool.REGION: "Click to place region A, then region B. Drag to move.",
+        MeasurementTool.NECK: (
+            "Click the left and right edge of the neck just below the jaw "
+            "(the skin silhouette, not a collar). Drag a point to adjust it. Esc clears."
+        ),
     }
+
+    # Tools drawing two-point measurements with the PolylineEditor.
+    TWO_POINT_TOOLS = (MeasurementTool.VECTOR, MeasurementTool.NECK)
+    # Tools using the surface-sampling options.
+    SURFACE_TOOLS = (MeasurementTool.VECTOR, MeasurementTool.POLYLINE)
 
     def set_tool(self, tool, *args):
         self.current_tool = tool
         self.toolActions[tool].setChecked(True)
         self.polyline_editor = PolylineEditor(
-            max_points=2 if tool == MeasurementTool.VECTOR else None
+            max_points=2 if tool in self.TWO_POINT_TOOLS else None
         )
         self._tool_history_index = None
         self._point_drag_index = None
         self.regionOptionsWidget.setVisible(tool == MeasurementTool.REGION)
-        self.lineOptionsWidget.setVisible(tool != MeasurementTool.REGION)
+        self.lineOptionsWidget.setVisible(tool in self.SURFACE_TOOLS)
         self._set_region_selection_enabled(tool == MeasurementTool.REGION)
         self._update_tool_result()
 
@@ -610,6 +674,9 @@ class MainWindow(UILoaderMixin, QMainWindow):
     def _update_tool_result(self, *args):
         if self.current_tool == MeasurementTool.REGION:
             self._show_region_tool_result()
+            return
+        if self.current_tool == MeasurementTool.NECK:
+            self._show_neck_tool_result()
             return
         hint = self.TOOL_HINTS[self.current_tool]
         if self.depthmap is None:
@@ -667,6 +734,118 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 result.linear_mm,
                 result.surface_mm,
             )
+
+    def _neck_tool_unavailable(self, hint, unavailable, detail):
+        self.measurementPanel.set_tool_result(
+            MeasurementTool.NECK.value,
+            None,
+            None,
+            [detail],
+            hint,
+            unavailable=unavailable,
+            labels=NECK_TOOL_VALUE_LABELS,
+        )
+
+    def _show_neck_tool_result(self):
+        """Neck tool: width between the two clicked edges (neck_width_from_edges).
+
+        History: one row per measurement, linear = width; the surface column
+        stays empty (a circumference is not a surface length, and π·W is only
+        an upper bound; it is derivable from the width).
+        """
+        hint = self.TOOL_HINTS[MeasurementTool.NECK]
+        labels = NECK_TOOL_VALUE_LABELS
+        points = self.polyline_editor.points
+        portrait = getattr(self, "portrait", None)
+        if portrait is None or not hasattr(self, "image"):
+            self.measurementPanel.set_tool_result(
+                MeasurementTool.NECK.value,
+                None,
+                None,
+                [],
+                "Open a photo with depth data first. " + hint,
+                labels=labels,
+            )
+            return
+        if self._float_depth() is None:
+            # Legacy Camera-app photo: no metric float depth / intrinsics.
+            self._neck_tool_unavailable(hint, NECK_TOOL_LEGACY_NA, NECK_TOOL_LEGACY_DETAIL)
+            return
+        if depth_is_implausible(portrait):
+            self._neck_tool_unavailable(hint, IMPLAUSIBLE_DEPTH_NA, IMPLAUSIBLE_DEPTH_DETAIL)
+            return
+        if len(points) < 2:
+            self.measurementPanel.set_tool_result(
+                MeasurementTool.NECK.value, None, None, [], hint, labels=labels
+            )
+            return
+        measure = getattr(portrait_analyser, "neck_width_from_edges", None)
+        if measure is None:
+            self._neck_tool_unavailable(
+                hint,
+                "n/a",
+                "This portrait-analyser version has no neck width support (neck_width_from_edges).",
+            )
+            return
+        (ax, ay), (bx, by) = points[:2]
+        first = self.display_to_photo_coordinates(ax, ay)
+        second = self.display_to_photo_coordinates(bx, by)
+        if first == second:
+            self.measurementPanel.set_tool_result(
+                MeasurementTool.NECK.value,
+                None,
+                None,
+                ["The two edge points coincide."],
+                hint,
+                texts=("—", "—"),
+                labels=labels,
+            )
+            return
+        try:
+            result = measure(portrait, first, second)
+        except ValueError as exc:
+            logger.warning("neck_width_from_edges failed", exc_info=True)
+            self._neck_tool_unavailable(hint, "n/a", f"Neck width failed: {exc}")
+            return
+        if result is None:
+            self._neck_tool_unavailable(hint, NECK_TOOL_LEGACY_NA, NECK_TOOL_LEGACY_DETAIL)
+            return
+
+        status = getattr(result, "status", None)
+        details = []
+        width_mm = None
+        if status == NECK_WIDTH_OK:
+            width_mm = result.width_mm
+            texts = (
+                format_cm(width_mm),
+                format_neck_circumference(
+                    result.circumference_ellipse_mm, result.circumference_pi_w_mm
+                ),
+            )
+            left_cm = result.left_depth_cm
+            right_cm = result.right_depth_cm
+            if left_cm is not None and right_cm is not None:
+                details.append(f"Edge depth: L {left_cm:.1f} cm · R {right_cm:.1f} cm")
+            details.append("Circumference: ellipse assumes b/a 0.85–0.90; π·W is an upper bound.")
+        elif status in ("no-depth",):
+            texts = (format_cm(None), format_cm(None))
+            details.append(neck_width_message(result))
+        else:
+            # no-camera etc.: the photo cannot be measured with this tool.
+            self._neck_tool_unavailable(hint, "n/a", neck_width_message(result))
+            return
+        details.extend(f"⚠ {warning}" for warning in (getattr(result, "warnings", None) or []))
+        self.measurementPanel.set_tool_result(
+            MeasurementTool.NECK.value,
+            width_mm,
+            None,
+            details,
+            hint,
+            texts=texts,
+            labels=labels,
+        )
+        if self.polyline_editor.finished:
+            self._record_history(MeasurementTool.NECK, len(points), width_mm, None)
 
     def _show_region_tool_result(self):
         if depth_is_implausible(getattr(self, "portrait", None)):
@@ -776,6 +955,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 Qt.Key_V: MeasurementTool.VECTOR,
                 Qt.Key_M: MeasurementTool.POLYLINE,
                 Qt.Key_R: MeasurementTool.REGION,
+                Qt.Key_N: MeasurementTool.NECK,
             }
             tool = tool_by_key.get(event.key())
             if tool is not None:
@@ -1228,6 +1408,62 @@ class MainWindow(UILoaderMixin, QMainWindow):
         finally:
             painter.restore()
 
+    NECK_WIDTH_COLOR = QColor(40, 230, 120, 235)
+    NECK_WIDTH_BAND_COLOR = QColor(40, 230, 120, 130)
+
+    def _neck_width_overlay_visible(self):
+        result = getattr(self, "neck_width_auto", None)
+        return (
+            self.neckWidthOverlayAction.isChecked()
+            and result is not None
+            and getattr(result, "status", None) == NECK_WIDTH_OK
+            and getattr(self, "portrait", None) is not None
+            and hasattr(self, "image")
+            and self._neck_width_shown()
+        )
+
+    def _photo_to_main_display(self, point):
+        """Full-resolution photo point -> 480x640 display point (floats)."""
+        return translate_coordinates_to_other_image(
+            point, self.image.size, (const.MAIN_IMAGE_WIDTH, const.MAIN_IMAGE_HEIGHT)
+        )
+
+    def _paint_neck_width_overlay(self, painter, point_mapper, *, labels=False):
+        """Automatic neck width: the measuring row between its two edges.
+
+        ``point_mapper`` maps a full-resolution photo point to a QPoint on the
+        painted canvas. The searched band is drawn as two faint dashed lines.
+        """
+        result = self.neck_width_auto
+        left = point_mapper((result.left_x, result.row_y))
+        right = point_mapper((result.right_x, result.row_y))
+        painter.save()
+        try:
+            if result.band is not None:
+                margin = 0.15 * (result.right_x - result.left_x)
+                painter.setPen(QtGui.QPen(self.NECK_WIDTH_BAND_COLOR, 1, Qt.DashLine))
+                painter.setBrush(Qt.NoBrush)
+                for band_y in result.band:
+                    painter.drawLine(
+                        point_mapper((result.left_x - margin, band_y)),
+                        point_mapper((result.right_x + margin, band_y)),
+                    )
+            painter.setPen(QtGui.QPen(self.NECK_WIDTH_COLOR, 2))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawLine(left, right)
+            for point in (left, right):
+                painter.drawLine(point + QPoint(0, -6), point + QPoint(0, 6))
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(self.NECK_WIDTH_COLOR)
+            for point in (left, right):
+                painter.drawEllipse(point, 3, 3)
+            if labels:
+                painter.setPen(self.NECK_WIDTH_COLOR)
+                painter.setBrush(Qt.NoBrush)
+                painter.drawText(left + QPoint(4, -8), format_cm(result.width_mm))
+        finally:
+            painter.restore()
+
     def _paint_face_mesh_zoom(self, painter, display_point):
         """Paint FaceMesh on an already scaled zoom canvas (sharp dots and labels)."""
         main_size = (const.MAIN_IMAGE_WIDTH, const.MAIN_IMAGE_HEIGHT)
@@ -1325,7 +1561,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
             self.polyline_editor.points
         )
         show_face_mesh = self._face_mesh_in_zoom()
-        if not show_regions and not show_neck and not show_polyline and not show_face_mesh:
+        show_neck_width = self._neck_width_overlay_visible()
+        if not (show_regions or show_neck or show_polyline or show_face_mesh or show_neck_width):
             return
 
         def display_point(point):
@@ -1390,6 +1627,11 @@ class MainWindow(UILoaderMixin, QMainWindow):
                     return display_point(main_point)
 
                 self._paint_neck_depth_overlay(painter, neck_display_point)
+
+            if show_neck_width:
+                self._paint_neck_width_overlay(
+                    painter, lambda point: display_point(self._photo_to_main_display(point))
+                )
 
             if show_polyline:
                 self._paint_polyline_overlay(painter, display_point)
@@ -2204,6 +2446,14 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 )
                 painter.setPen(QColor(0, 0, 255, 127))
 
+            if self._neck_width_overlay_visible():
+
+                def neck_width_display_point(point):
+                    x, y = self._photo_to_main_display(point)
+                    return QPoint(round(x), round(y))
+
+                self._paint_neck_width_overlay(painter, neck_width_display_point, labels=True)
+
             print(
                 f"Neck midpoint draw check: "
                 f"checkbox={self.ui.showNeckArcCheckBox.isChecked()}, "
@@ -2832,6 +3082,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.neck_confidence_ratio = None
         self.neck_arc = None
         self.neck_midpoint = None
+        self.neck_width_auto = None
+        self.neck_width_error = None
         self.mediapipe_debug = None
         self.face_mesh_debug = None
         self.mouth_measurement = None
@@ -2890,7 +3142,12 @@ class MainWindow(UILoaderMixin, QMainWindow):
 
             neck_arc_available = pose == PortraitPose.NEUTRAL_NECK
             self.ui.showNeckArcCheckBox.setEnabled(neck_arc_available)
-            self.ui.showNeckArcCheckBox.setChecked(neck_arc_available)
+            # Capture-app photos report the width-based neck measurement
+            # instead (Neck width overlay); the older skin-matte / geometric
+            # arc overlay stays available but starts hidden.
+            self.ui.showNeckArcCheckBox.setChecked(
+                neck_arc_available and self._float_depth() is None
+            )
             self.ui.showNeckArcCheckBox.setToolTip(
                 (
                     "Yellow: skin-matte boundary; cyan: first stable depth sample; "
@@ -3077,6 +3334,9 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 print(f"compute_neck_arc failed: {type(e).__name__}: {e}")
                 self.neck_arc = None
 
+        if depth_measurable:
+            self._compute_neck_width()
+
         self._compute_mouth_measurement()
 
         self.last_click_y = self.last_click_x = None
@@ -3086,6 +3346,89 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.ui.dataOutputEdit.setPlainText(self._diagnostics_text())
         self.updateWindowTitle()
         self._update_tool_result()
+
+    def _compute_neck_width(self):
+        """Automatic width-based neck measurement (capture-app photos only).
+
+        ``portrait.neck_width`` is lazy (about 1 s on first access), so it is
+        only read for float-depth photos in the neutral-neck pose, where the
+        panel shows it. Legacy photos never touch it.
+        """
+        self.neck_width_auto = None
+        self.neck_width_error = None
+        if self._float_depth() is None:
+            return
+        if self.neck_midpoint is None or self.neck_midpoint.pose != PortraitPose.NEUTRAL_NECK:
+            return
+        try:
+            self.neck_width_auto = getattr(self.portrait, "neck_width", None)
+        except Exception as exc:
+            # Unexpected library failure: keep the rest of the analysis and
+            # say so in the panel instead of aborting the photo load.
+            logger.exception("portrait.neck_width failed")
+            self.neck_width_error = f"{type(exc).__name__}: {exc}"
+
+    def _neck_width_shown(self):
+        """True when the panel reports the width-based neck result."""
+        return (
+            self._float_depth() is not None
+            and self.neck_midpoint is not None
+            and self.neck_midpoint.pose == PortraitPose.NEUTRAL_NECK
+            and not depth_is_implausible(self.portrait)
+        )
+
+    def _neck_width_lines(self):
+        """``(lines, warning)`` of the automatic width-based neck result."""
+        result = self.neck_width_auto
+        if self.neck_width_error is not None:
+            return [f"Neck width: error ({self.neck_width_error})", NECK_TOOL_HINT_SHORT], None
+        if result is None:
+            return ["Neck width: not available"], None
+        if result.status != NECK_WIDTH_OK:
+            lines = [f"Neck width: n/a — {neck_width_message(result)}"]
+            if result.status in NECK_WIDTH_TOOL_HELPS:
+                lines.append(NECK_TOOL_HINT_SHORT)
+            return lines, None
+        line = (
+            f"Neck width: {format_cm(result.width_mm)} · circumference "
+            f"{format_neck_circumference(result.circumference_ellipse_mm, result.circumference_pi_w_mm)}"
+        )
+        warnings = [f"Neck width: {warning}" for warning in (result.warnings or [])]
+        return [line], combine_warnings(*warnings)
+
+    def _neck_width_diagnostics(self):
+        """Diagnostics block for the width-based neck result (capture-app only)."""
+        result = self.neck_width_auto
+        txt = "\n\n[Neck width] "
+        if self.neck_width_error is not None:
+            return txt + f"error: {self.neck_width_error}"
+        if result is None:
+            return txt + "not available"
+        txt += f"status: {result.status}"
+        if result.status != NECK_WIDTH_OK:
+            txt += f"\n  {neck_width_message(result)}"
+        else:
+            low, high = result.circumference_ellipse_mm
+            txt += (
+                f"\n  Width (3D): {result.width_mm / 10.0:.2f} cm"
+                f"\n  Circumference: ellipse {low / 10.0:.1f}–{high / 10.0:.1f} cm"
+                f" (b/a 0.85–0.90 assumed), π·W {result.circumference_pi_w_mm / 10.0:.1f} cm"
+                f"\n  Row Y {result.row_y:.0f} px, edges X {result.left_x:.0f} → "
+                f"{result.right_x:.0f} px"
+            )
+            if result.left_depth_cm is not None and result.right_depth_cm is not None:
+                txt += (
+                    f"\n  Edge depth: L {result.left_depth_cm:.1f} cm,"
+                    f" R {result.right_depth_cm:.1f} cm"
+                )
+            txt += f"\n  Rows used: {len(result.rows_used)}"
+        if result.band is not None:
+            txt += (
+                f"\n  Band: Y {result.band[0]:.0f}–{result.band[1]:.0f} px ({result.band_source})"
+            )
+        for warning in result.warnings or []:
+            txt += f"\n  ⚠ {warning}"
+        return txt
 
     def _library_depth_kwargs(self):
         """``{"depth": portrait.depth}`` for portrait_analyser measurement calls.
@@ -3150,7 +3493,10 @@ class MainWindow(UILoaderMixin, QMainWindow):
             self.measurementPanel.set_automatic_results(lines, depth_warning)
             return
         warning = None
-        if pose == PortraitPose.NEUTRAL_NECK:
+        if pose == PortraitPose.NEUTRAL_NECK and self._neck_width_shown():
+            neck_lines, warning = self._neck_width_lines()
+            lines.extend(neck_lines)
+        elif pose == PortraitPose.NEUTRAL_NECK:
             if self.neck_arc is not None:
                 lines.append(f"Neck circumference: {format_cm(self.neck_arc.circumference_mm)}")
             else:
@@ -3232,6 +3578,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
                     txt += "%.2f cm" % (self.mouth_measurement.distance_3d_mm / 10.0)
 
         elif pose == PortraitPose.NEUTRAL_NECK:
+            if self._neck_width_shown():
+                txt += self._neck_width_diagnostics()
             if self.neck_measurement_auto:
                 nma = self.neck_measurement_auto
                 low_confidence = (

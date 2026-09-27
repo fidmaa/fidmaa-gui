@@ -1,4 +1,4 @@
-"""Click-based measurement tools (vector, polyline) and measurement history.
+"""Click-based measurement tools (vector, polyline, neck) and measurement history.
 
 Qt-free so the editing and summing rules can be unit-tested directly. Points
 are in the 480x640 display space; distance callbacks return millimetres.
@@ -18,6 +18,9 @@ class MeasurementTool(str, Enum):
     VECTOR = "Vector"
     POLYLINE = "Polyline"
     REGION = "Region"
+    # Two clicks on the neck edges; width via portrait_analyser's
+    # neck_width_from_edges (capture-app photos only).
+    NECK = "Neck"
 
 
 @dataclass

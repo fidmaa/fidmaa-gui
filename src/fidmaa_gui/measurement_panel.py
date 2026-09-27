@@ -23,14 +23,32 @@ from .measurement_tools import HistoryEntry, MeasurementHistory, format_history_
 HISTORY_HEADERS = ("File", "Tool", "Points", "Linear [cm]", "Surface [cm]")
 
 
-def _number(value_cm: float) -> str:
-    return QLocale().toString(float(value_cm), "f", 2)
+DEFAULT_VALUE_LABELS = ("Linear (3D):", "Surface:")
 
 
-def format_cm(value_mm: float | None) -> str:
+def _number(value_cm: float, decimals: int = 2) -> str:
+    return QLocale().toString(float(value_cm), "f", decimals)
+
+
+def format_cm(value_mm: float | None, decimals: int = 2) -> str:
     if value_mm is None:
         return "n/a (invalid depth)"
-    return f"{_number(value_mm / 10.0)} cm"
+    return f"{_number(value_mm / 10.0, decimals)} cm"
+
+
+def format_neck_circumference(ellipse_mm, pi_w_mm) -> str:
+    """Circumference text, e.g. "≈ 39,1–40,2 cm (ellipse) · ≤ 42,2 cm (π·W)".
+
+    The ellipse range assumes a population b/a ratio; π·W is an upper bound.
+    Either part is left out when the library did not give it.
+    """
+    parts = []
+    if ellipse_mm is not None:
+        low, high = ellipse_mm
+        parts.append(f"≈ {_number(low / 10.0, 1)}–{_number(high / 10.0, 1)} cm (ellipse)")
+    if pi_w_mm is not None:
+        parts.append(f"≤ {format_cm(pi_w_mm, 1)} (π·W)")
+    return " · ".join(parts) if parts else "n/a"
 
 
 class MeasurementPanel(QWidget):
@@ -69,8 +87,9 @@ class MeasurementPanel(QWidget):
             font.setPointSize(font.pointSize() + 5)
             font.setBold(True)
             label.setFont(font)
-        values.addRow("Linear (3D):", self.linearValueLabel)
-        values.addRow("Surface:", self.surfaceValueLabel)
+        values.addRow(DEFAULT_VALUE_LABELS[0], self.linearValueLabel)
+        values.addRow(DEFAULT_VALUE_LABELS[1], self.surfaceValueLabel)
+        self._valuesLayout = values
         result_layout.addLayout(values)
         self.detailsLabel = QLabel()
         self.detailsLabel.setWordWrap(True)
@@ -115,13 +134,38 @@ class MeasurementPanel(QWidget):
             self.autoWarningLabel.clear()
             self.autoWarningLabel.hide()
 
-    def set_tool_result(self, title, linear_mm, surface_mm, details, hint, unavailable=None):
+    def value_label_texts(self) -> tuple[str, str]:
+        """Current captions of the two big values (e.g. "Linear (3D):")."""
+        return tuple(
+            self._valuesLayout.labelForField(label).text()
+            for label in (self.linearValueLabel, self.surfaceValueLabel)
+        )
+
+    def set_tool_result(
+        self,
+        title,
+        linear_mm,
+        surface_mm,
+        details,
+        hint,
+        unavailable=None,
+        *,
+        labels=DEFAULT_VALUE_LABELS,
+        texts=None,
+    ):
         """Show the active tool's result.
 
         ``unavailable`` replaces both values with that text (e.g.
         "n/a (implausible depth)") when the photo cannot be measured at all.
+        ``labels`` captions the two big values (the Neck tool shows "Width
+        (3D):" / "Circumference:"); ``texts`` gives both values as ready-made
+        strings instead of formatting ``linear_mm`` / ``surface_mm``.
         """
         self.resultGroup.setTitle(title)
+        for label, caption in zip(
+            (self.linearValueLabel, self.surfaceValueLabel), labels, strict=True
+        ):
+            self._valuesLayout.labelForField(label).setText(caption)
         if unavailable:
             self.linearValueLabel.setText(unavailable)
             self.surfaceValueLabel.setText(unavailable)
@@ -131,6 +175,9 @@ class MeasurementPanel(QWidget):
             # failed.
             self.linearValueLabel.setText("—")
             self.surfaceValueLabel.setText("—")
+        elif texts is not None:
+            self.linearValueLabel.setText(texts[0])
+            self.surfaceValueLabel.setText(texts[1])
         else:
             self.linearValueLabel.setText(format_cm(linear_mm))
             self.surfaceValueLabel.setText(format_cm(surface_mm))
