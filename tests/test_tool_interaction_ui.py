@@ -10,6 +10,7 @@ from PySide6.QtTest import QTest
 
 from fidmaa_gui.app import MainWindow
 from fidmaa_gui.depth_visualization import DepthDisplayMode
+from fidmaa_gui.measurement_panel import format_cm
 from fidmaa_gui.measurement_tools import MeasurementTool, PolylineEditor
 from fidmaa_gui.region_measurement import Region, SelectionMode
 
@@ -650,4 +651,18 @@ def test_teeth_zoom_is_boosted_for_display_but_readout_stays_raw(qapp):
     window.paintZoomedTeethmap(teethmap, source_size=(100, 100), crop_box=(0, 0, 100, 100))
     assert painted[-1] is None
     window.portrait = None
+    window.close()
+
+
+def test_vector_details_show_point_depths_and_in_plane_length(qapp):
+    window = _window_with_flat_depth()
+    window._on_image_clicked(QPointF(100, 100))
+    window._on_image_clicked(QPointF(100, 300))
+
+    details = window.measurementPanel.detailsLabel.text()
+    depth_cm = window.get_depthmap_distance(30)
+    assert f"Depth A: {depth_cm:.1f} cm · B: {depth_cm:.1f} cm" in details
+    # On a flat depth map the in-plane length equals the linear 3D length.
+    linear = window.measurementPanel.history.entries[0].linear_mm
+    assert f"In image plane (no Δ depth): {format_cm(linear)}" in details
     window.close()

@@ -595,7 +595,14 @@ class MainWindow(UILoaderMixin, QMainWindow):
             else:
                 depth_a_cm = self.get_depthmap_distance(self.get_depthmap_value(ax, ay))
                 depth_b_cm = self.get_depthmap_distance(self.get_depthmap_value(bx, by))
+                details.append(f"Depth A: {depth_a_cm:.1f} cm · B: {depth_b_cm:.1f} cm")
                 details.append(f"Δ depth: {(depth_b_cm - depth_a_cm) * 10:+.1f} mm")
+                # Length ignoring the depth difference: each point projected at
+                # its own depth, only the X/Y components of the 3D vector.
+                ax_mm, ay_mm = self.translate_click_to_mm(depth_a_cm, ax, ay)
+                bx_mm, by_mm = self.translate_click_to_mm(depth_b_cm, bx, by)
+                in_plane_mm = math.hypot(bx_mm - ax_mm, by_mm - ay_mm)
+                details.append(f"In image plane (no Δ depth): {format_cm(in_plane_mm)}")
         else:
             state = "finished" if self.polyline_editor.finished else "in progress"
             details.append(f"{len(result.segments)} segments ({state})")
