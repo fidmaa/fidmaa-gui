@@ -426,9 +426,12 @@ def test_neck_tool_two_clicks_measure_in_photo_pixels_and_add_history(qapp, monk
 
     panel = window.measurementPanel
     assert panel.resultGroup.title() == "Neck"
-    assert panel.value_label_texts() == ("Width (3D):", "Circumference:")
-    assert panel.linearValueLabel.text() == format_cm(134.5)
-    assert panel.surfaceValueLabel.text() == format_neck_circumference((391.4, 402.3), 422.5)
+    # Changed with the arc circle: fixed caption order, the width is the
+    # second value and the width model's circumference moved to the details.
+    assert panel.value_label_texts() == ("Circumference (arc circle):", "Width (3D):")
+    assert panel.linearValueLabel.text() == "— (needs ≥ 3 points)"
+    assert panel.surfaceValueLabel.text() == format_cm(134.5)
+    assert format_neck_circumference((391.4, 402.3), 422.5) in panel.detailsLabel.text()
     assert "collar?" in panel.detailsLabel.text()
     assert "2 points = width only" in panel.hintLabel.text()
 
@@ -533,7 +536,7 @@ def test_neck_tool_no_depth_result_is_na_and_recorded(qapp, monkeypatch):
     window._finish_polyline()  # changed: the Neck tool is finished explicitly
 
     panel = window.measurementPanel
-    assert panel.linearValueLabel.text() == "n/a (invalid depth)"
+    assert panel.surfaceValueLabel.text() == "n/a (invalid depth)"  # changed: width is 2nd
     assert "No depth inside one of the clicked edges" in panel.detailsLabel.text()
     (entry,) = panel.history.entries
     assert entry.linear_mm is None

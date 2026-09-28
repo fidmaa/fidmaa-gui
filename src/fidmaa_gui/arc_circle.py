@@ -21,7 +21,10 @@ Qt-free so the maths is unit-tested directly.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+
+Point = tuple[float, float]
 
 # k at or below this is treated as a flat front: theta would be below ~6.3
 # degrees and R explodes with the smallest depth error.
@@ -107,3 +110,40 @@ def arc_circle(chord_mm: float | None, arc_mm: float | None) -> ArcCircleResult:
         circumference_mm=2.0 * math.pi * radius,
         warnings=warnings,
     )
+
+
+def inset_polyline_ends(
+    points: Sequence[Point],
+    inset_px: Callable[[Point, Point, Point], float | None],
+) -> list[Point] | None:
+    """Move the first and last point inward along their adjacent segments.
+
+    ``inset_px(end, unit_inward, neighbour)`` gives the inset in the points' pixel units
+    (it depends on the local depth), or None when it cannot be read. Each end
+    moves at most half its segment, so no segment inverts (the first and last
+    segments are distinct for >= 3 points). Returns None when an inset is
+    unavailable or the polyline is degenerate.
+    """
+    moved = [tuple(point) for point in points]
+    if len(moved) < 3:
+        return None
+    for end_index, step in ((0, 1), (len(moved) - 1, -1)):
+        end = moved[end_index]
+        # The nearest distinct neighbour along the polyline.
+        neighbour = None
+        index = end_index + step
+        while 0 <= index < len(moved):
+            if moved[index] != end:
+                neighbour = moved[index]
+                break
+            index += step
+        if neighbour is None:
+            return None
+        length = math.dist(end, neighbour)
+        unit = ((neighbour[0] - end[0]) / length, (neighbour[1] - end[1]) / length)
+        offset = inset_px(end, unit, neighbour)
+        if offset is None or not math.isfinite(offset) or offset < 0.0:
+            return None
+        offset = min(offset, 0.5 * length)
+        moved[end_index] = (end[0] + offset * unit[0], end[1] + offset * unit[1])
+    return moved

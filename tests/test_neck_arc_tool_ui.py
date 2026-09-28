@@ -13,8 +13,8 @@ from PySide6.QtCore import QPointF, Qt
 from PySide6.QtTest import QTest
 
 from fidmaa_gui.app import (
-    NECK_TOOL_ARC_VALUE_LABELS,
     NECK_TOOL_LEGACY_DETAIL,
+    NECK_TOOL_NEEDS_3_POINTS,
     NECK_TOOL_VALUE_LABELS,
 )
 from fidmaa_gui.arc_circle import arc_circle
@@ -46,6 +46,9 @@ def _stub_lengths(window, monkeypatch, chord_mm=CHORD_MM, arc_mm=ARC_MM):
         surface_calls.append(step)
         return None if arc_mm is None else arc_mm / (len(POINTS) - 1)
 
+    # The end inset is tested on a synthetic cylinder below; here the clicked
+    # points go to the chord and arc unchanged.
+    monkeypatch.setattr(window, "_neck_arc_points", lambda points: list(points))
     monkeypatch.setattr(window, "linear_length_between_two_clicks_or_none", linear)
     monkeypatch.setattr(window, "surface_vector_filtered", surface)
     return chord_calls, surface_calls
@@ -73,7 +76,8 @@ def test_five_point_polyline_gives_the_arc_circle_circumference(qapp, monkeypatc
     expected = arc_circle(CHORD_MM, ARC_MM)
     assert expected.circumference_mm == pytest.approx(409, abs=1)
     panel = window.measurementPanel
-    assert panel.value_label_texts() == NECK_TOOL_ARC_VALUE_LABELS
+    assert panel.value_label_texts() == NECK_TOOL_VALUE_LABELS
+    assert NECK_TOOL_VALUE_LABELS == ("Circumference (arc circle):", "Width (3D):")
     assert panel.linearValueLabel.text() == format_cm(expected.circumference_mm, 1)
     assert panel.surfaceValueLabel.text() == format_cm(134.5)
 
@@ -120,8 +124,9 @@ def test_in_progress_polyline_shows_the_live_result_and_backspace_undoes(qapp, m
     assert "3 points (in progress)" in window.measurementPanel.detailsLabel.text()
     QTest.keyClick(window, Qt.Key_Backspace)
     assert len(window.polyline_editor.points) == 2
-    # Two points: back to the width-only captions.
+    # Two points: same captions, the arc circle waits for a third point.
     assert window.measurementPanel.value_label_texts() == NECK_TOOL_VALUE_LABELS
+    assert window.measurementPanel.linearValueLabel.text() == NECK_TOOL_NEEDS_3_POINTS
     assert window.measurementPanel.history.entries == ()
     window.close()
 
@@ -133,8 +138,10 @@ def test_two_point_finish_is_width_only(qapp, monkeypatch):
 
     panel = window.measurementPanel
     assert panel.value_label_texts() == NECK_TOOL_VALUE_LABELS
-    assert panel.linearValueLabel.text() == format_cm(134.5)
-    assert panel.surfaceValueLabel.text() == format_neck_circumference((391.4, 402.3), 422.5)
+    assert panel.linearValueLabel.text() == NECK_TOOL_NEEDS_3_POINTS
+    assert panel.surfaceValueLabel.text() == format_cm(134.5)
+    details = panel.detailsLabel.text()
+    assert f"Width model: {format_neck_circumference((391.4, 402.3), 422.5)}" in details
     assert chord_calls == [] and surface_calls == []
     (entry,) = panel.history.entries
     assert entry.points == 2
@@ -261,3 +268,109 @@ def test_real_flat_float_depth_goes_through_the_library_paths(qapp, monkeypatch)
     assert panel.linearValueLabel.text() == "n/a (front too flat to fit a circle)"
     assert "Chord (3D): n/a" not in panel.detailsLabel.text()
     window.close()
+
+
+# ------------------------------------------------ end inset on a cylinder
+
+CYLINDER_R_MM = 65.0
+CYLINDER_FRONT_MM = 450.0
+BACKGROUND_MM = 1000.0
+ROW_Y = 320.0
+
+
+def _cylinder_depth():
+    """Vertical circular cylinder (R 65 mm, front at 45 cm) in front of a 1 m
+    background, one depth pixel per display pixel. The silhouette mixes with
+    the background like real TrueDepth maps: the last neck column is half
+    background, the first background column a quarter neck."""
+    import numpy as np
+
+    from .test_float_depth import CAMERA, PHOTO_SIZE
+
+    centre_z = CYLINDER_FRONT_MM + CYLINDER_R_MM
+    u = (np.arange(480) + 0.5) * PHOTO_SIZE[0] / 480
+    a = (u - CAMERA.cx) / CAMERA.fx
+    q = a * a + 1
+    disc = centre_z**2 - q * (centre_z**2 - CYLINDER_R_MM**2)
+    row = np.where(disc >= 0, (centre_z - np.sqrt(np.clip(disc, 0, None))) / q, BACKGROUND_MM)
+    inside = np.flatnonzero(disc >= 0)
+    left, right = int(inside[0]), int(inside[-1])
+    mixed = row.copy()
+    mixed[left] = 0.5 * (row[left] + BACKGROUND_MM)
+    mixed[right] = 0.5 * (row[right] + BACKGROUND_MM)
+    mixed[left - 1] = 0.25 * row[left] + 0.75 * BACKGROUND_MM
+    mixed[right + 1] = 0.25 * row[right] + 0.75 * BACKGROUND_MM
+    depth_m = np.tile(mixed / 1000.0, (640, 1))
+    # Silhouette in display x: the outer boundaries of the edge columns.
+    return depth_m, float(left), float(right + 1)
+
+
+def _cylinder_fit(window, left, right, shift, *, inset=True):
+    width = right - left
+    a, b = left + shift * width, right - shift * width
+    points = [(a + (b - a) * i / 4, ROW_Y) for i in range(5)]
+    if inset:
+        points = window._neck_arc_points(points)
+    chord = window.linear_length_between_two_clicks_or_none(*points[0], *points[-1])
+    return arc_circle(chord, window._measure_current_polyline(points).surface_mm)
+
+
+@pytest.fixture
+def cylinder_window(qapp):
+    depth_m, left, right = _cylinder_depth()
+    window = _float_window(depth_m=depth_m)
+    window.portrait.depth.subject_depth_m = CYLINDER_FRONT_MM / 1000.0
+    window.set_tool(MeasurementTool.NECK)
+    yield window, left, right
+    window.close()
+
+
+def test_inset_ends_sit_3_mm_inside_the_clicked_edges(cylinder_window):
+    from .test_float_depth import CAMERA
+
+    window, left, right = cylinder_window
+    points = [(left, ROW_Y), (238.0, ROW_Y), (right, ROW_Y)]
+    moved = window._neck_arc_points(points)
+    assert moved[1] == points[1]
+    for end, inset_end in ((points[0], moved[0]), (points[-1], moved[-1])):
+        z_cm = window.distance_for_click(*inset_end)
+        photo_shift = abs(inset_end[0] - end[0]) * 3024 / 480
+        # 3 mm at the depth found there (two-pass, like the library).
+        assert photo_shift == pytest.approx(3.0 * CAMERA.fx / (z_cm * 10.0), rel=0.02)
+    assert moved[0][0] > left and moved[-1][0] < right
+
+
+def test_inset_keeps_the_mixed_silhouette_out_of_the_arc(cylinder_window):
+    window, left, right = cylinder_window
+    true_c = 2 * 3.141592653589793 * CYLINDER_R_MM
+    raw = _cylinder_fit(window, left, right, 0.0, inset=False)
+    fit = _cylinder_fit(window, left, right, 0.0)
+    # Clicked exactly on the silhouette: the raw ends read the mixed pixels
+    # (C more than 2x the truth); the inset ends do not, and stay below 180°.
+    assert raw.circumference_mm > 2 * true_c
+    assert fit.circumference_mm == pytest.approx(true_c, rel=0.15)
+    assert fit.theta_deg < 180
+
+
+def test_inset_arc_circle_is_stable_for_inward_edges(cylinder_window):
+    window, left, right = cylinder_window
+    c3 = _cylinder_fit(window, left, right, 0.03).circumference_mm
+    c6 = _cylinder_fit(window, left, right, 0.06).circumference_mm
+    assert c3 == pytest.approx(c6, rel=0.05)
+    assert c6 == pytest.approx(2 * 3.141592653589793 * CYLINDER_R_MM, rel=0.03)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Goal not met yet: within ~3 mm of the silhouette the library's "
+        "integration smoothing flattens the steep flank, the arc reads short "
+        "and C reads ~9 % high (462 vs 425 mm for edges on vs 3 % inside the "
+        "silhouette); see scratchpad report"
+    ),
+)
+def test_goal_arc_circle_stable_within_3_percent_when_edges_move_3_percent(cylinder_window):
+    window, left, right = cylinder_window
+    c0 = _cylinder_fit(window, left, right, 0.0).circumference_mm
+    c3 = _cylinder_fit(window, left, right, 0.03).circumference_mm
+    assert c0 == pytest.approx(c3, rel=0.03)

@@ -12,6 +12,7 @@ from fidmaa_gui.arc_circle import (
     ARC_CIRCLE_OK,
     arc_chord_ratio,
     arc_circle,
+    inset_polyline_ends,
     solve_central_angle,
 )
 
@@ -113,3 +114,37 @@ def test_ratio_is_monotonic_and_the_solver_stays_in_bounds():
 def test_solver_rejects_ratios_without_a_circle(ratio):
     with pytest.raises(ValueError):
         solve_central_angle(ratio)
+
+
+# ------------------------------------------------------------- end inset
+
+
+def test_inset_moves_both_ends_inward_along_their_segments():
+    points = [(0.0, 0.0), (10.0, 0.0), (20.0, 5.0), (30.0, 0.0)]
+    seen = []
+
+    def inset(end, unit, neighbour):
+        seen.append((end, neighbour))
+        return 2.0
+
+    moved = inset_polyline_ends(points, inset)
+    assert moved[0] == pytest.approx((2.0, 0.0))
+    assert moved[1:3] == points[1:3]
+    ux, uy = (20.0 - 30.0) / math.hypot(10, 5), 5.0 / math.hypot(10, 5)
+    assert moved[-1] == pytest.approx((30.0 + 2 * ux, 2 * uy))
+    assert seen == [((0.0, 0.0), (10.0, 0.0)), ((30.0, 0.0), (20.0, 5.0))]
+
+
+def test_inset_is_clamped_so_no_segment_inverts():
+    points = [(0.0, 0.0), (4.0, 0.0), (8.0, 0.0)]
+    moved = inset_polyline_ends(points, lambda end, unit, neighbour: 100.0)
+    assert moved == [(2.0, 0.0), (4.0, 0.0), (6.0, 0.0)]
+
+
+def test_inset_skips_duplicate_neighbours_and_reports_failures():
+    points = [(0.0, 0.0), (0.0, 0.0), (6.0, 0.0), (9.0, 0.0)]
+    moved = inset_polyline_ends(points, lambda end, unit, neighbour: 1.0)
+    assert moved[0] == (1.0, 0.0) and moved[-1] == (8.0, 0.0)
+    assert inset_polyline_ends(points, lambda end, unit, neighbour: None) is None
+    assert inset_polyline_ends(points[:2], lambda end, unit, neighbour: 1.0) is None
+    assert inset_polyline_ends([(1.0, 1.0)] * 3, lambda end, unit, neighbour: 1.0) is None

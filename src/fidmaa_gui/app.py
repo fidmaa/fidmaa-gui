@@ -32,6 +32,7 @@ from portrait_analyser.neck import (
     compute_neck_circumference,
     neck_search_bounds_from_face_landmarks,
 )
+from portrait_analyser.neck_width import EDGE_INSET_MM
 from portrait_analyser.pose import PortraitPose, detect_neck_midpoint
 from PySide6 import QtGui
 from PySide6.QtCore import QObject, QPoint, QSettings, Qt, QTimer
@@ -59,7 +60,13 @@ from PySide6.QtWidgets import (
 )
 
 from . import const, errors
-from .arc_circle import ARC_CIRCLE_FLAT, ARC_CIRCLE_FLAT_TEXT, ARC_CIRCLE_OK, arc_circle
+from .arc_circle import (
+    ARC_CIRCLE_FLAT,
+    ARC_CIRCLE_FLAT_TEXT,
+    ARC_CIRCLE_OK,
+    arc_circle,
+    inset_polyline_ends,
+)
 from .calculations import findPoint, lower_jaw_x_bounds, neck_to_jaw_width_ratio
 from .depth_source import (
     IMPLAUSIBLE_DEPTH_NA,
@@ -113,9 +120,14 @@ logger = logging.getLogger(__name__)
 NECK_WIDTH_OK = "ok"
 NECK_TOOL_LEGACY_NA = "n/a (needs capture-app photo)"
 NECK_TOOL_LEGACY_DETAIL = "Neck tool needs a TrueDepth capture-app photo"
-NECK_TOOL_VALUE_LABELS = ("Width (3D):", "Circumference:")
-# Three or more Neck tool points: the arc-circle circumference comes first.
-NECK_TOOL_ARC_VALUE_LABELS = ("Circumference (arc circle):", "Width (3D):")
+# Fixed order for every Neck tool state, so rows never swap while clicking.
+NECK_TOOL_VALUE_LABELS = ("Circumference (arc circle):", "Width (3D):")
+NECK_TOOL_NEEDS_3_POINTS = "— (needs ≥ 3 points)"
+# The arc circle's chord and arc start this far inside the clicked edges, the
+# same inset the library reads the width's edge depth at: within ~1 mm of the
+# silhouette the depth mixes with the background (see the "Width bias" notes
+# in portrait_analyser.neck_width).
+NECK_ARC_EDGE_INSET_MM = EDGE_INSET_MM
 NECK_TOOL_HINT_SHORT = (
     "Use the Neck tool (N): click the left neck edge, points across the front of the neck "
     "and the right edge."
@@ -739,8 +751,9 @@ class MainWindow(UILoaderMixin, QMainWindow):
         else:
             self.measurementPanel.replace_history(self._tool_history_index, entry)
 
-    def _measure_current_polyline(self):
-        points = self.polyline_editor.points
+    def _measure_current_polyline(self, points=None):
+        if points is None:
+            points = self.polyline_editor.points
         if self.depthmap is None or not hasattr(self, "image") or len(points) < 2:
             return None
         step = self.surfaceStepSpin.value()
@@ -942,15 +955,16 @@ class MainWindow(UILoaderMixin, QMainWindow):
 
         arc_circumference_mm = None
         if len(points) < 3:
-            # Two points: the width model only, as before the arc circle.
-            details = list(width_details)
+            # Two points: the width model only; the arc circle needs a point
+            # on the front of the neck.
+            details = [f"Width model: {width_model_text}"]
+            details.extend(width_details)
             if status == NECK_WIDTH_OK:
                 details.append(
-                    "Circumference: ellipse assumes b/a 0.85–0.90; "
-                    "circle = π·W (a model, not a bound)."
+                    "Ellipse assumes b/a 0.85–0.90; circle = π·W (a model, not a bound)."
                 )
             details.extend(width_warnings)
-            texts = (width_text, width_model_text)
+            texts = (NECK_TOOL_NEEDS_3_POINTS, width_text)
         else:
             fit = self._neck_arc_circle(points)
             if fit.status == ARC_CIRCLE_OK:
@@ -974,11 +988,11 @@ class MainWindow(UILoaderMixin, QMainWindow):
             details.extend(width_details)
             details.extend(width_warnings)
             details.append(
-                f"Arc: surface step {self.surfaceStepSpin.value()} px (median filtered); "
-                "circle through the chord and the arc."
+                f"Arc: ends sampled {format_decimal(NECK_ARC_EDGE_INSET_MM, 0)} mm inside "
+                f"the clicked edges; surface step {self.surfaceStepSpin.value()} px "
+                "(median filtered); circle through the chord and the arc."
             )
             texts = (circumference_text, width_text)
-            labels = NECK_TOOL_ARC_VALUE_LABELS
 
         self.measurementPanel.set_tool_result(
             MeasurementTool.NECK.value,
@@ -996,18 +1010,56 @@ class MainWindow(UILoaderMixin, QMainWindow):
     def _neck_arc_circle(self, points):
         """Arc-circle fit for a Neck polyline (display points, >= 3).
 
-        Chord: the 3D distance between the first and last point, the same
-        depth/camera path as the Vector tool's linear length. Arc: the sum of
-        the segments' surface lengths, the same filtered path as the Polyline
-        tool (the library's ``surface_length_mm`` for float depth).
+        The first and last point are first moved ``NECK_ARC_EDGE_INSET_MM``
+        inward along their segments (see ``_neck_arc_points``). Chord: the 3D
+        distance between the moved ends, the same depth/camera path as the
+        Vector tool's linear length. Arc: the sum of the segments' surface
+        lengths, the same filtered path as the Polyline tool (the library's
+        ``surface_length_mm`` for float depth).
         """
+        points = self._neck_arc_points(points)
+        if points is None:
+            return arc_circle(None, None)
         (ax, ay), (bx, by) = points[0], points[-1]
         chord_mm = self.linear_length_between_two_clicks_or_none(ax, ay, bx, by)
-        polyline = self._measure_current_polyline()
+        polyline = self._measure_current_polyline(points)
         arc_mm = None
         if polyline is not None and polyline.segments:
             arc_mm = polyline.surface_mm
         return arc_circle(chord_mm, arc_mm)
+
+    def _neck_arc_points(self, points):
+        """The Neck polyline (display points) with both ends moved
+        ``NECK_ARC_EDGE_INSET_MM`` inward, or None (no camera / no depth).
+
+        Like the library's edge depth: the inset in photo pixels is
+        ``inset_mm * fx / z`` with ``z`` read first at the neighbouring point,
+        then refined at the inset point itself (two passes).
+        """
+        camera = portrait_camera(self)
+        depth = self._float_depth()
+        if camera is None or depth is None:
+            return None
+        photo_points = [self.display_to_photo_coordinates(x, y) for x, y in points]
+
+        def inset_px(end, unit, neighbour):
+            z_cm = depth.distance_cm(*neighbour, radius=1)
+            if z_cm is None:
+                z_cm = depth.distance_cm(*end, radius=1)
+            if z_cm is None:
+                return None
+            offset = NECK_ARC_EDGE_INSET_MM * camera.fx / (z_cm * 10.0)
+            inside = depth.distance_cm(
+                end[0] + offset * unit[0], end[1] + offset * unit[1], radius=1
+            )
+            if inside is not None:
+                offset = NECK_ARC_EDGE_INSET_MM * camera.fx / (inside * 10.0)
+            return offset
+
+        moved = inset_polyline_ends(photo_points, inset_px)
+        if moved is None:
+            return None
+        return [self._photo_to_main_display(point) for point in moved]
 
     def _show_region_tool_result(self):
         if depth_is_implausible(getattr(self, "portrait", None)):
