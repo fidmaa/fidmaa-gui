@@ -31,7 +31,9 @@ HISTORY_HEADERS = ("File", "Tool", "Points", "Linear [cm]", "Surface [cm]")
 DEFAULT_VALUE_LABELS = ("Linear (3D):", "Surface:")
 
 SURFACE_COLUMN_HELP = "Vector/Polyline: length along the depth surface." + (
-    " Neck: circumference, midpoint of the ellipse range (b/a 0.85–0.90 assumed)."
+    " Neck: circumference — the arc-circle model (chord + surface arc, 3 or more"
+    " points) when it fits, otherwise the midpoint of the width model's ellipse"
+    " range (b/a 0.85–0.90 assumed)."
     if NECK_HISTORY_SURFACE_IS_CIRCUMFERENCE
     else " Neck: empty."
 )
@@ -39,6 +41,11 @@ SURFACE_COLUMN_HELP = "Vector/Polyline: length along the depth surface." + (
 
 def _number(value_cm: float, decimals: int = 2) -> str:
     return QLocale().toString(float(value_cm), "f", decimals)
+
+
+def format_decimal(value: float, decimals: int = 2) -> str:
+    """A plain number in the user's locale (e.g. "1,280")."""
+    return _number(value, decimals)
 
 
 def format_cm(value_mm: float | None, decimals: int = 2) -> str:

@@ -401,16 +401,22 @@ def _record_calls(monkeypatch, result):
 
 
 def test_neck_tool_two_clicks_measure_in_photo_pixels_and_add_history(qapp, monkeypatch):
+    # Changed with the arc circle: the Neck tool is an open polyline now (no
+    # 2-point limit, the surface-step options are shown) and the history row
+    # appears when the measurement is finished with Enter.
     result = _ok_result(warnings=["right edge: outside nearer than neck edge (collar?) by 0.6 cm"])
     calls = _record_calls(monkeypatch, result)
     window = _float_window()
     window.set_tool(MeasurementTool.NECK)
-    assert window.polyline_editor.max_points == 2
-    assert window.lineOptionsWidget.isHidden()
+    assert window.polyline_editor.max_points is None
+    assert not window.lineOptionsWidget.isHidden()
 
     window._on_image_clicked(QPointF(160, 356))
     assert calls == []  # one click: nothing to measure yet
     window._on_image_clicked(QPointF(320, 360))
+    assert window.measurementPanel.history.entries == ()  # not finished yet
+    QTest.keyClick(window, Qt.Key_Return)
+    assert window.polyline_editor.finished
 
     assert len(calls) == 1
     portrait, left, right = calls[0]
@@ -424,7 +430,7 @@ def test_neck_tool_two_clicks_measure_in_photo_pixels_and_add_history(qapp, monk
     assert panel.linearValueLabel.text() == format_cm(134.5)
     assert panel.surfaceValueLabel.text() == format_neck_circumference((391.4, 402.3), 422.5)
     assert "collar?" in panel.detailsLabel.text()
-    assert "just below the jaw" in panel.hintLabel.text()
+    assert "2 points = width only" in panel.hintLabel.text()
 
     (entry,) = panel.history.entries
     assert entry.tool == MeasurementTool.NECK
@@ -445,6 +451,7 @@ def test_neck_history_surface_switch_off_leaves_the_column_empty(qapp, monkeypat
     window.set_tool(MeasurementTool.NECK)
     window._on_image_clicked(QPointF(160, 356))
     window._on_image_clicked(QPointF(320, 360))
+    window._finish_polyline()  # changed: the Neck tool is finished explicitly
     (entry,) = window.measurementPanel.history.entries
     assert entry.surface_mm is None
     window.close()
@@ -489,6 +496,7 @@ def test_dragging_a_neck_edge_replaces_the_history_row(qapp, monkeypatch):
     window.set_tool(MeasurementTool.NECK)
     window._on_image_clicked(QPointF(160, 356))
     window._on_image_clicked(QPointF(320, 360))
+    window._on_image_right_clicked(QPointF(320, 360))  # changed: explicit finish
     _record_calls(monkeypatch, _ok_result(width_mm=130.0))
 
     window._begin_point_drag(QPointF(320, 360))
@@ -509,6 +517,7 @@ def test_other_tools_get_their_captions_back(qapp, monkeypatch):
     window.set_tool(MeasurementTool.VECTOR)
     assert window.measurementPanel.value_label_texts() == DEFAULT_VALUE_LABELS
     assert not window.lineOptionsWidget.isHidden()
+    assert window.polyline_editor.max_points == 2
     window.close()
 
 
@@ -521,6 +530,7 @@ def test_neck_tool_no_depth_result_is_na_and_recorded(qapp, monkeypatch):
     window.set_tool(MeasurementTool.NECK)
     window._on_image_clicked(QPointF(160, 356))
     window._on_image_clicked(QPointF(320, 360))
+    window._finish_polyline()  # changed: the Neck tool is finished explicitly
 
     panel = window.measurementPanel
     assert panel.linearValueLabel.text() == "n/a (invalid depth)"

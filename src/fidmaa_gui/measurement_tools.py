@@ -18,20 +18,28 @@ class MeasurementTool(str, Enum):
     VECTOR = "Vector"
     POLYLINE = "Polyline"
     REGION = "Region"
-    # Two clicks on the neck edges; width via portrait_analyser's
-    # neck_width_from_edges (capture-app photos only).
+    # A polyline from the left neck edge across the front of the neck to the
+    # right edge: width from the first/last point via portrait_analyser's
+    # neck_width_from_edges, circumference from the arc circle (>= 3 points;
+    # capture-app photos only).
     NECK = "Neck"
 
 
-# Neck tool history rows: the "Surface" column holds the circumference
-# (midpoint of the library's ellipse range) when True, and stays empty when
-# False. A single switch until the user decides which is more useful.
+# Neck tool history rows: the "Surface" column holds a circumference when
+# True -- the arc-circle circumference (>= 3 points, see arc_circle.py) when
+# it could be fitted, otherwise the midpoint of the library's ellipse range --
+# and stays empty when False. A single switch until the user decides which is
+# more useful.
 NECK_HISTORY_SURFACE_IS_CIRCUMFERENCE = True
 
 
-def neck_history_surface_mm(ellipse_mm) -> float | None:
+def neck_history_surface_mm(ellipse_mm, arc_circle_mm: float | None = None) -> float | None:
     """Value for a Neck row's Surface column (see the switch above)."""
-    if not NECK_HISTORY_SURFACE_IS_CIRCUMFERENCE or ellipse_mm is None:
+    if not NECK_HISTORY_SURFACE_IS_CIRCUMFERENCE:
+        return None
+    if arc_circle_mm is not None:
+        return arc_circle_mm
+    if ellipse_mm is None:
         return None
     low, high = ellipse_mm
     return 0.5 * (low + high)

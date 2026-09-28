@@ -59,6 +59,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import const, errors
+from .arc_circle import ARC_CIRCLE_FLAT, ARC_CIRCLE_FLAT_TEXT, ARC_CIRCLE_OK, arc_circle
 from .calculations import findPoint, lower_jaw_x_bounds, neck_to_jaw_width_ratio
 from .depth_source import (
     IMPLAUSIBLE_DEPTH_NA,
@@ -79,6 +80,7 @@ from .depth_visualization import (
 from .measurement_panel import (
     MeasurementPanel,
     format_cm,
+    format_decimal,
     format_neck_circumference,
 )
 from .measurement_tools import (
@@ -112,7 +114,12 @@ NECK_WIDTH_OK = "ok"
 NECK_TOOL_LEGACY_NA = "n/a (needs capture-app photo)"
 NECK_TOOL_LEGACY_DETAIL = "Neck tool needs a TrueDepth capture-app photo"
 NECK_TOOL_VALUE_LABELS = ("Width (3D):", "Circumference:")
-NECK_TOOL_HINT_SHORT = "Use the Neck tool (N): click the left and right neck edge below the jaw."
+# Three or more Neck tool points: the arc-circle circumference comes first.
+NECK_TOOL_ARC_VALUE_LABELS = ("Circumference (arc circle):", "Width (3D):")
+NECK_TOOL_HINT_SHORT = (
+    "Use the Neck tool (N): click the left neck edge, points across the front of the neck "
+    "and the right edge."
+)
 
 
 # The library's no-camera messages address programmers ("pass camera=").
@@ -485,7 +492,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
             (
                 MeasurementTool.NECK,
                 Qt.Key_N,
-                "Neck: click the left and right neck edge below the jaw (capture-app photos)",
+                "Neck: click the left neck edge, across the front, and the right edge; "
+                "finish with Enter (capture-app photos)",
             ),
         )
         for tool, key, tip in tool_details:
@@ -684,15 +692,17 @@ class MainWindow(UILoaderMixin, QMainWindow):
         ),
         MeasurementTool.REGION: "Click to place region A, then region B. Drag to move.",
         MeasurementTool.NECK: (
-            "Click the left and right edge of the neck just below the jaw "
-            "(the skin silhouette, not a collar). Drag a point to adjust it. Esc clears."
+            "Click the left neck edge, points across the front of the neck, and the right "
+            "edge; finish with Enter or right-click. 2 points = width only."
         ),
     }
 
     # Tools drawing two-point measurements with the PolylineEditor.
-    TWO_POINT_TOOLS = (MeasurementTool.VECTOR, MeasurementTool.NECK)
-    # Tools using the surface-sampling options.
-    SURFACE_TOOLS = (MeasurementTool.VECTOR, MeasurementTool.POLYLINE)
+    TWO_POINT_TOOLS = (MeasurementTool.VECTOR,)
+    # Tools finished explicitly with Enter / right-click.
+    OPEN_POLYLINE_TOOLS = (MeasurementTool.POLYLINE, MeasurementTool.NECK)
+    # Tools using the surface-sampling options (the Neck tool's arc).
+    SURFACE_TOOLS = (MeasurementTool.VECTOR, MeasurementTool.POLYLINE, MeasurementTool.NECK)
 
     def set_tool(self, tool, *args):
         self.current_tool = tool
@@ -818,11 +828,17 @@ class MainWindow(UILoaderMixin, QMainWindow):
         )
 
     def _show_neck_tool_result(self):
-        """Neck tool: width between the two clicked edges (neck_width_from_edges).
+        """Neck tool: a polyline from the left neck edge across the front of the
+        neck to the right edge.
 
-        History: one row per measurement, linear = width; the surface column
-        holds the circumference (midpoint of the ellipse range) or stays empty,
-        see ``NECK_HISTORY_SURFACE_IS_CIRCUMFERENCE`` in measurement_tools.
+        Width: between the first and last point (neck_width_from_edges).
+        Circumference (3 or more points): the circle through the 3D chord and
+        the surface arc along the polyline (arc_circle.py).
+
+        History: one row per finished measurement, linear = width; the surface
+        column holds the arc-circle circumference when available, otherwise
+        the midpoint of the width model's ellipse range, or stays empty, see
+        ``NECK_HISTORY_SURFACE_IS_CIRCUMFERENCE`` in measurement_tools.
         """
         hint = self.TOOL_HINTS[MeasurementTool.NECK]
         labels = NECK_TOOL_VALUE_LABELS
@@ -858,7 +874,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 "This portrait-analyser version has no neck width support (neck_width_from_edges).",
             )
             return
-        (ax, ay), (bx, by) = points[:2]
+        (ax, ay), (bx, by) = points[0], points[-1]
         first = self.display_to_photo_coordinates(ax, ay)
         second = self.display_to_photo_coordinates(bx, by)
         if first == second:
@@ -872,54 +888,98 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 labels=labels,
             )
             return
-        try:
-            result = measure(portrait, first, second)
-        except ValueError as exc:
-            logger.warning("neck_width_from_edges failed", exc_info=True)
-            self._neck_tool_unavailable(hint, "n/a", f"Neck width failed: {exc}")
-            return
+        # The width depends on the first/last point only: dragging a middle
+        # point or finishing the polyline must not re-run the library.
+        cache_key = (measure, id(portrait), first, second)
+        cached = getattr(self, "_neck_width_tool_cache", None)
+        if cached is not None and cached[0] == cache_key and cached[1] is portrait:
+            result = cached[2]
+        else:
+            try:
+                result = measure(portrait, first, second)
+            except ValueError as exc:
+                logger.warning("neck_width_from_edges failed", exc_info=True)
+                self._neck_width_tool_cache = None
+                self._neck_tool_unavailable(hint, "n/a", f"Neck width failed: {exc}")
+                return
+            self._neck_width_tool_cache = (cache_key, portrait, result)
         if result is None:
             self._neck_tool_unavailable(hint, NECK_TOOL_LEGACY_NA, NECK_TOOL_LEGACY_DETAIL)
             return
 
         status = getattr(result, "status", None)
-        details = []
+        if status not in (NECK_WIDTH_OK, "no-depth"):
+            # no-camera, relative-depth, error: this tool cannot measure it.
+            self._neck_tool_unavailable(hint, "n/a", neck_width_message(result, portrait))
+            return
+
+        width_details = []
         width_mm = None
-        surface_mm = None
+        ellipse_mm = None
         if status == NECK_WIDTH_OK:
             width_mm = result.width_mm
-            surface_mm = neck_history_surface_mm(result.circumference_ellipse_mm)
-            texts = (
-                format_cm(width_mm),
-                format_neck_circumference(
-                    result.circumference_ellipse_mm, result.circumference_circle_mm
-                ),
-            )
+            ellipse_mm = result.circumference_ellipse_mm
+            width_model_text = format_neck_circumference(ellipse_mm, result.circumference_circle_mm)
             # Quality once: the low-quality warning (with reasons), else a
             # plain "Quality: good" line.
             quality_warning = neck_width_quality_warning(result)
             if quality_warning is not None:
-                details.append(f"⚠ {quality_warning}")
+                width_details.append(f"⚠ {quality_warning}")
             elif getattr(result, "quality", None) is not None:
-                details.append(f"Quality: {result.quality}")
+                width_details.append(f"Quality: {result.quality}")
             position = neck_width_position_text(result, quality=False)
             if position is not None:
-                details.append(position[:1].upper() + position[1:])
+                width_details.append(position[:1].upper() + position[1:])
             left_cm = result.left_depth_cm
             right_cm = result.right_depth_cm
             if left_cm is not None and right_cm is not None:
-                details.append(f"Edge depth: L {left_cm:.1f} cm · R {right_cm:.1f} cm")
-            details.append(
-                "Circumference: ellipse assumes b/a 0.85–0.90; circle = π·W (a model, not a bound)."
-            )
-        elif status in ("no-depth",):
-            texts = (format_cm(None), format_cm(None))
-            details.append(neck_width_message(result, portrait))
+                width_details.append(f"Edge depth: L {left_cm:.1f} cm · R {right_cm:.1f} cm")
         else:
-            # no-camera, relative-depth, error: this tool cannot measure it.
-            self._neck_tool_unavailable(hint, "n/a", neck_width_message(result, portrait))
-            return
-        details.extend(f"⚠ {warning}" for warning in neck_width_other_warnings(result))
+            width_model_text = format_cm(None)
+            width_details.append(neck_width_message(result, portrait))
+        width_warnings = [f"⚠ {warning}" for warning in neck_width_other_warnings(result)]
+        width_text = format_cm(width_mm)
+
+        arc_circumference_mm = None
+        if len(points) < 3:
+            # Two points: the width model only, as before the arc circle.
+            details = list(width_details)
+            if status == NECK_WIDTH_OK:
+                details.append(
+                    "Circumference: ellipse assumes b/a 0.85–0.90; "
+                    "circle = π·W (a model, not a bound)."
+                )
+            details.extend(width_warnings)
+            texts = (width_text, width_model_text)
+        else:
+            fit = self._neck_arc_circle(points)
+            if fit.status == ARC_CIRCLE_OK:
+                arc_circumference_mm = fit.circumference_mm
+                circumference_text = format_cm(fit.circumference_mm, 1)
+            elif fit.status == ARC_CIRCLE_FLAT:
+                circumference_text = f"n/a ({ARC_CIRCLE_FLAT_TEXT})"
+            else:
+                circumference_text = format_cm(None)
+            state = "finished" if self.polyline_editor.finished else "in progress"
+            details = [f"{len(points)} points ({state})"]
+            details.append(f"Chord (3D): {format_cm(fit.chord_mm)} · arc: {format_cm(fit.arc_mm)}")
+            if fit.ratio is not None:
+                details.append(f"Arc/chord: {format_decimal(fit.ratio, 3)}")
+            if fit.status == ARC_CIRCLE_OK:
+                details.append(
+                    f"θ: {format_decimal(fit.theta_deg, 1)}° · R: {format_cm(fit.radius_mm)}"
+                )
+            details.extend(f"⚠ {warning[:1].upper()}{warning[1:]}" for warning in fit.warnings)
+            details.append(f"Width model: {width_model_text}")
+            details.extend(width_details)
+            details.extend(width_warnings)
+            details.append(
+                f"Arc: surface step {self.surfaceStepSpin.value()} px (median filtered); "
+                "circle through the chord and the arc."
+            )
+            texts = (circumference_text, width_text)
+            labels = NECK_TOOL_ARC_VALUE_LABELS
+
         self.measurementPanel.set_tool_result(
             MeasurementTool.NECK.value,
             width_mm,
@@ -930,7 +990,24 @@ class MainWindow(UILoaderMixin, QMainWindow):
             labels=labels,
         )
         if self.polyline_editor.finished:
+            surface_mm = neck_history_surface_mm(ellipse_mm, arc_circumference_mm)
             self._record_history(MeasurementTool.NECK, len(points), width_mm, surface_mm)
+
+    def _neck_arc_circle(self, points):
+        """Arc-circle fit for a Neck polyline (display points, >= 3).
+
+        Chord: the 3D distance between the first and last point, the same
+        depth/camera path as the Vector tool's linear length. Arc: the sum of
+        the segments' surface lengths, the same filtered path as the Polyline
+        tool (the library's ``surface_length_mm`` for float depth).
+        """
+        (ax, ay), (bx, by) = points[0], points[-1]
+        chord_mm = self.linear_length_between_two_clicks_or_none(ax, ay, bx, by)
+        polyline = self._measure_current_polyline()
+        arc_mm = None
+        if polyline is not None and polyline.segments:
+            arc_mm = polyline.surface_mm
+        return arc_circle(chord_mm, arc_mm)
 
     def _show_region_tool_result(self):
         if depth_is_implausible(getattr(self, "portrait", None)):
@@ -997,7 +1074,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self._finish_polyline()
 
     def _finish_polyline(self):
-        if self.current_tool != MeasurementTool.POLYLINE:
+        if self.current_tool not in self.OPEN_POLYLINE_TOOLS:
             return
         if self.polyline_editor.finished or not self.polyline_editor.finish():
             return
