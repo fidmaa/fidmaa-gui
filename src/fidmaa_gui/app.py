@@ -231,6 +231,76 @@ def neck_width_position_text(result, *, quality=True):
     return " · ".join(parts) if parts else None
 
 
+# portrait_analyser.neck_sag: NeckSagResult.status on success and the model
+# names (not imported: absent from portrait-analyser 0.9.0).
+NECK_SAG_OK = "ok"
+NECK_SAG_MODEL_LABELS = {
+    "fitted_circle": "fitted circle",
+    "circle": "π·W",
+    "arc_circle": "arc circle",
+    "sagitta_ellipse": "sagitta ellipse",
+    "fitted_ellipse": "fitted ellipse",
+}
+NECK_SAG_FRONT_SOURCE_LABELS = {
+    "beard-border": "below the beard border",
+    "chin-end": "below the chin",
+    "inferred": "inferred (no beard/chin boundary found)",
+}
+# The library's warning when the tape path failed (the fallback line says it).
+NECK_SAG_FAILED_WARNING_PREFIX = "no tape-plane circumference"
+
+
+def neck_sag_model_label(model):
+    return NECK_SAG_MODEL_LABELS.get(model, str(model).replace("_", " "))
+
+
+def neck_sag(result):
+    """The ``"ok"`` tape-path result (``NeckSagResult``) of an ``"ok"`` automatic
+    neck width, or None (older library, failed or not computed)."""
+    if getattr(result, "status", None) != NECK_WIDTH_OK:
+        return None
+    sag = getattr(result, "sag", None)
+    if getattr(sag, "status", None) != NECK_SAG_OK:
+        return None
+    if getattr(sag, "headline_mm", None) is None:
+        return None
+    return sag
+
+
+def neck_sag_headline(result):
+    """``(circumference_mm, model)`` of the tape-path headline, or None."""
+    sag = neck_sag(result)
+    if sag is None:
+        return None
+    circumference = getattr(result, "circumference_mm", None)
+    model = getattr(result, "circumference_model", None)
+    if circumference is None:
+        circumference, model = sag.headline_mm, sag.headline_model
+    return circumference, model or sag.headline_model
+
+
+def neck_sag_unavailable_text(result):
+    """Why an ``"ok"`` automatic width has no tape-path circumference."""
+    if not hasattr(result, "sag"):
+        return "not in this portrait-analyser version"
+    sag = result.sag
+    if sag is None:
+        return "not computed"
+    if getattr(sag, "status", None) == NECK_SAG_OK:
+        return "no circumference model"
+    message = getattr(sag, "message", None)
+    return _sentence(message) if message else "failed"
+
+
+def format_sensitivity(value):
+    """Sensitivity to the side-point placement (diagnostics), e.g. "±2.5 %"."""
+    if value is None:
+        return None
+    if not math.isfinite(value):
+        return "lost when the side points move"
+    return f"±{100.0 * value:.1f} %"
+
+
 tr = QObject.tr
 
 IMPLAUSIBLE_DEPTH_DETAIL = "Depth looks implausible — measurements disabled."
@@ -616,7 +686,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self.neckWidthOverlayAction.setCheckable(True)
         self.neckWidthOverlayAction.setChecked(True)
         self.neckWidthOverlayAction.setStatusTip(
-            "Show the automatic neck width row and its edges (capture-app photos)"
+            "Show the automatic neck measurement: the tape path around the front of the neck "
+            "(side and front points), or the width row and its edges (capture-app photos)"
         )
         self.neckWidthOverlayAction.toggled.connect(lambda *_: self._redraw_tool_overlay())
 
@@ -975,6 +1046,11 @@ class MainWindow(UILoaderMixin, QMainWindow):
         else:
             width_model_text = format_cm(None)
             width_details.append(neck_width_message(result, portrait))
+        # For comparison: the automatic tape-path circumference of this photo
+        # (manual edges get no tape path of their own).
+        auto = neck_sag_headline(getattr(self, "neck_width_auto", None))
+        if auto is not None:
+            width_details.append(f"Auto (tape path): {format_cm(auto[0], 1)}")
         width_warnings = [f"⚠ {warning}" for warning in neck_width_other_warnings(result)]
         width_text = format_cm(width_mm)
 
@@ -1761,6 +1837,9 @@ class MainWindow(UILoaderMixin, QMainWindow):
 
     NECK_WIDTH_COLOR = QColor(40, 230, 120, 235)
     NECK_WIDTH_BAND_COLOR = QColor(40, 230, 120, 130)
+    # Tape path front point (under the chin / beard): an orange diamond.
+    NECK_SAG_FRONT_COLOR = QColor(255, 150, 20, 245)
+    NECK_SAG_FRONT_SIZE = 6
 
     def _neck_width_overlay_visible(self):
         result = getattr(self, "neck_width_auto", None)
@@ -1780,14 +1859,29 @@ class MainWindow(UILoaderMixin, QMainWindow):
         )
 
     def _paint_neck_width_overlay(self, painter, point_mapper, *, labels=False):
-        """Automatic neck width: the measuring row between its two edges.
+        """Automatic neck measurement: the tape path, or the width row.
+
+        With a tape path (``result.sag``, portrait-analyser's neck_sag): the
+        path from the left side point under the chin/beard to the right one,
+        the two side points (ticks) and the front point (a diamond,
+        ``NECK_SAG_FRONT_COLOR``). Without one: the measuring row between its
+        two edges, as before.
 
         ``point_mapper`` maps a full-resolution photo point to a QPoint on the
         painted canvas. The searched band is drawn as two faint dashed lines.
         """
         result = self.neck_width_auto
-        left = point_mapper((result.left_x, result.row_y))
-        right = point_mapper((result.right_x, result.row_y))
+        sag = neck_sag(result)
+        path = list(getattr(sag, "path", None) or []) if sag is not None else []
+        if len(path) >= 2:
+            left_xy = sag.left_xy or (result.left_x, result.row_y)
+            right_xy = sag.right_xy or (result.right_x, result.row_y)
+        else:
+            path = []
+            left_xy = (result.left_x, result.row_y)
+            right_xy = (result.right_x, result.row_y)
+        left = point_mapper(left_xy)
+        right = point_mapper(right_xy)
         painter.save()
         try:
             if result.band is not None:
@@ -1801,17 +1895,42 @@ class MainWindow(UILoaderMixin, QMainWindow):
                     )
             painter.setPen(QtGui.QPen(self.NECK_WIDTH_COLOR, 2))
             painter.setBrush(Qt.NoBrush)
-            painter.drawLine(left, right)
+            if path:
+                painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+                painter.drawPolyline(QtGui.QPolygon([point_mapper(p) for p in path]))
+            else:
+                painter.drawLine(left, right)
             for point in (left, right):
                 painter.drawLine(point + QPoint(0, -6), point + QPoint(0, 6))
             painter.setPen(Qt.NoPen)
             painter.setBrush(self.NECK_WIDTH_COLOR)
             for point in (left, right):
                 painter.drawEllipse(point, 3, 3)
+            if path and sag.front_xy is not None:
+                front = point_mapper(sag.front_xy)
+                size = self.NECK_SAG_FRONT_SIZE
+                painter.setPen(QtGui.QPen(QColor(0, 0, 0, 200), 1))
+                painter.setBrush(self.NECK_SAG_FRONT_COLOR)
+                painter.drawPolygon(
+                    QtGui.QPolygon(
+                        [
+                            front + QPoint(0, -size),
+                            front + QPoint(size, 0),
+                            front + QPoint(0, size),
+                            front + QPoint(-size, 0),
+                        ]
+                    )
+                )
             if labels:
                 painter.setPen(self.NECK_WIDTH_COLOR)
                 painter.setBrush(Qt.NoBrush)
-                painter.drawText(left + QPoint(4, -8), format_cm(result.width_mm))
+                headline = neck_sag_headline(result) if path else None
+                text = (
+                    format_cm(result.width_mm)
+                    if headline is None
+                    else f"{format_cm(headline[0], 1)} · W {format_cm(result.width_mm)}"
+                )
+                painter.drawText(left + QPoint(4, -8), text)
         finally:
             painter.restore()
 
@@ -3740,6 +3859,9 @@ class MainWindow(UILoaderMixin, QMainWindow):
             if result.status in NECK_WIDTH_TOOL_HELPS:
                 lines.append(NECK_TOOL_HINT_SHORT)
             return lines, None
+        sag = neck_sag(result)
+        if sag is not None:
+            return self._neck_sag_lines(result, sag)
         circumference = format_neck_circumference(
             result.circumference_ellipse_mm, result.circumference_circle_mm
         )
@@ -3747,8 +3869,55 @@ class MainWindow(UILoaderMixin, QMainWindow):
         position = neck_width_position_text(result)
         if position is not None:
             lines.append(f"  {position}")
+        other_warnings = neck_width_other_warnings(result)
+        if hasattr(result, "sag"):
+            # Tape-path library without a tape path here: say why (once).
+            lines.append(f"  tape path: n/a — {neck_sag_unavailable_text(result)}")
+            other_warnings = [
+                w for w in other_warnings if not w.startswith(NECK_SAG_FAILED_WARNING_PREFIX)
+            ]
         warnings = [neck_width_quality_warning(result)]
-        warnings += [f"Neck width: {warning}" for warning in neck_width_other_warnings(result)]
+        warnings += [f"Neck width: {warning}" for warning in other_warnings]
+        return lines, combine_warnings(*warnings)
+
+    def _neck_sag_lines(self, result, sag):
+        """``(lines, warning)``: the tape-path circumference as the headline,
+        the width and a compact comparison with the other models."""
+        circumference_mm, model = neck_sag_headline(result)
+        lines = [
+            f"Neck circumference: {format_cm(circumference_mm, 1)} ({neck_sag_model_label(model)})"
+        ]
+        parts = [f"width {format_cm(result.width_mm)}"]
+        height_mm = getattr(result, "height_below_chin_mm", None)
+        if height_mm is not None:
+            parts.append(f"sides {format_cm(height_mm, 1)} below the chin")
+        if sag.quality is not None:
+            parts.append(f"quality: {sag.quality}")
+        lines.append("  " + " · ".join(parts))
+        circumferences = sag.circumferences_mm or {}
+        compare = []
+        for other in ("circle", "arc_circle"):
+            if other != model and circumferences.get(other) is not None:
+                compare.append(
+                    f"{format_cm(circumferences[other], 1)} ({neck_sag_model_label(other)})"
+                )
+        ellipse = format_neck_circumference(result.circumference_ellipse_mm, None)
+        if result.circumference_ellipse_mm is not None:
+            compare.append(ellipse)
+        if compare:
+            lines.append("  compare: " + " · ".join(compare))
+        warnings = []
+        if sag.quality == NECK_WIDTH_QUALITY_LOW:
+            text = "Neck circumference quality: low"
+            if sag.quality_reasons:
+                text += " — " + "; ".join(sag.quality_reasons)
+            warnings.append(text)
+        # The tape path's reasons include the width's; list everything else once.
+        shown = set(sag.quality_reasons or [])
+        for warning in [*(sag.warnings or []), *(result.warnings or [])]:
+            if warning not in shown:
+                shown.add(warning)
+                warnings.append(f"Neck: {warning}")
         return lines, combine_warnings(*warnings)
 
     def _neck_width_diagnostics(self):
@@ -3799,7 +3968,83 @@ class MainWindow(UILoaderMixin, QMainWindow):
         if reject_counts:
             counts = ", ".join(f"{code} {count}" for code, count in reject_counts.items())
             txt += f"\n  Rejected rows: {counts}"
+        search_top_y = getattr(result, "search_top_y", None)
+        if search_top_y is not None:
+            txt += f"\n  Search from Y {search_top_y:.0f} px (below the jaw angles / chin)"
         for warning in result.warnings or []:
+            txt += f"\n  ⚠ {warning}"
+        if result.status == NECK_WIDTH_OK and hasattr(result, "sag"):
+            txt += self._neck_sag_diagnostics(result)
+        return txt
+
+    def _neck_sag_diagnostics(self, result):
+        """Diagnostics block for the tape path (portrait-analyser neck_sag)."""
+        sag = result.sag
+        txt = "\n\n[Neck tape path] "
+        if sag is None:
+            return txt + "not computed"
+        txt += f"status: {sag.status}"
+        if sag.message:
+            txt += f"\n  {_sentence(sag.message)}"
+        if sag.front_xy is not None:
+            source = NECK_SAG_FRONT_SOURCE_LABELS.get(sag.front_source, sag.front_source)
+            txt += (
+                f"\n  Front point: X {sag.front_xy[0]:.0f}, Y {sag.front_xy[1]:.0f} px"
+                f" ({sag.front_source}: {source})"
+            )
+        for label, value in (
+            ("Beard border Y", sag.beard_border_y),
+            ("Chin end Y", sag.chin_end_y),
+        ):
+            if value is not None:
+                txt += f"\n  {label}: {value:.0f} px"
+        if sag.status != NECK_SAG_OK:
+            for warning in sag.warnings or []:
+                txt += f"\n  ⚠ {warning}"
+            return txt
+        headline = neck_sag_headline(result)
+        if headline is not None:
+            txt += (
+                f"\n  Circumference: {headline[0] / 10.0:.1f} cm"
+                f" ({neck_sag_model_label(headline[1])}, headline)"
+            )
+        tilt = sag.plane_tilt_deg
+        if tilt is not None:
+            line = f"\n  Plane tilt: {tilt:.1f} deg (least squares)"
+            if sag.plane_tilt_3pt_deg is not None:
+                line += f", 3-point plane {sag.plane_tilt_3pt_deg:.1f} deg"
+            txt += line
+        for label, value, unit in (
+            ("Front drop", sag.front_drop_deg, "deg"),
+            ("Width (3D, side points)", sag.width_mm, "mm"),
+            ("Sagitta", sag.sagitta_mm, "mm"),
+            ("Front arc (3D path)", sag.front_arc_mm, "mm"),
+            ("Off-plane RMS", sag.off_plane_rms_mm, "mm"),
+            ("Fitted circle R", sag.circle_radius_mm, "mm"),
+            ("Fitted ellipse b", sag.ellipse_b_mm, "mm"),
+        ):
+            if value is not None:
+                txt += f"\n  {label}: {value:.1f} {unit}"
+        txt += "\n  Models (sensitivity to the side points):"
+        circumferences = sag.circumferences_mm or {}
+        order = [m for m in NECK_SAG_MODEL_LABELS if m in circumferences]
+        order += [m for m in circumferences if m not in order]
+        for model in order:
+            line = f"\n    {neck_sag_model_label(model)}: {circumferences[model] / 10.0:.1f} cm"
+            sensitivity = format_sensitivity((sag.sensitivity or {}).get(model))
+            if sensitivity is not None:
+                line += f" ({sensitivity})"
+            if model == sag.headline_model:
+                line += " — headline"
+            txt += line
+        prior = sag.circumference_prior_ellipse_mm
+        if prior is not None:
+            txt += f"\n    prior ellipse (b/a 0.85–0.90): {prior[0] / 10.0:.1f}–{prior[1] / 10.0:.1f} cm"
+        txt += f"\n  Quality: {sag.quality}"
+        for reason in sag.quality_reasons or []:
+            txt += f"\n    - {reason}"
+        txt += f"\n  Path: {len(sag.path or [])} points"
+        for warning in sag.warnings or []:
             txt += f"\n  ⚠ {warning}"
         return txt
 
