@@ -64,6 +64,8 @@ def _sag(**overrides):
         off_plane_rms_mm=1.9,
         circle_radius_mm=65.9,
         circle_centre_mm=(0.0, -30.0),
+        circle_rms_mm=0.8,
+        circle_span_deg=141.0,
         ellipse_b_mm=45.0,
         circumferences_mm={
             "circle": 422.5,
@@ -82,6 +84,22 @@ def _sag(**overrides):
             "fitted_ellipse": 0.070,
             "arc_circle": 0.052,
         },
+        sensitivity_detail={
+            "side-width+3%": {
+                "circle": 0.03,
+                "sagitta_ellipse": 0.071,
+                "fitted_circle": 0.025,
+                "fitted_ellipse": 0.070,
+                "arc_circle": 0.052,
+            },
+            "ends-10%": {
+                "circle": 0.0,
+                "sagitta_ellipse": 0.0,
+                "fitted_circle": -0.012,
+                "fitted_ellipse": None,
+                "arc_circle": 0.0,
+            },
+        },
         profile_mm=[],
         path_3d_mm=[],
     )
@@ -91,8 +109,11 @@ def _sag(**overrides):
 
 def _sag_result(sag=None, **overrides):
     sag = _sag() if sag is None else sag
+    ok = sag.status == "ok"
     values = dict(
         sag=sag,
+        circumference_quality=sag.quality if ok else None,
+        circumference_quality_reasons=list(sag.quality_reasons) if ok else [],
         circumference_mm=sag.headline_mm if sag.status == "ok" else None,
         circumference_model=sag.headline_model if sag.status == "ok" else None,
         search_top_y=2215.0,
@@ -126,9 +147,12 @@ def test_panel_headline_is_the_tape_path_circumference(qapp):
     window._update_automatic_results()
 
     lines = window.measurementPanel.autoLabel.text().splitlines()
-    assert lines[1] == f"Neck circumference: {format_cm(414.0, 1)} (fitted circle)"
+    assert lines[1] == (
+        f"Neck circumference: {format_cm(414.0, 1)} (fitted circle) · quality: good"
+    )
     assert lines[2] == (
-        f"  width {format_cm(134.5)} · sides {format_cm(12.0, 1)} below the chin · quality: good"
+        f"  width {format_cm(134.5)} · sides {format_cm(12.0, 1)} below the chin"
+        " · width quality: good"
     )
     assert lines[3] == (
         f"  compare: {format_cm(422.5, 1)} (π·W) · {format_cm(425.0, 1)} (arc circle) · "
@@ -139,6 +163,44 @@ def test_panel_headline_is_the_tape_path_circumference(qapp):
     assert "skin-matte" not in text
     assert "Depth: TrueDepth absolute" in text
     assert window.measurementPanel.autoWarningLabel.isHidden()
+    tooltip = window.measurementPanel.autoLabel.toolTip()
+    assert "fitted circle is shape-dependent: ~±5 % on round necks" in tooltip
+    assert "+22 % on front-flat and −17 % on deep necks (synthetic)" in tooltip
+    window.close()
+
+
+def test_headline_quality_is_the_circumference_quality_not_the_width_quality(qapp):
+    tape = "the tape samples span only 80 deg of the fitted circle (< 100)"
+    sag = _sag(quality="low", quality_reasons=[tape])
+    window = _neutral_float_window(
+        _sag_result(
+            sag,
+            circumference_quality="low",
+            circumference_quality_reasons=[tape],
+            height_below_chin_mm=-4.0,
+        )
+    )
+    window._update_automatic_results()
+
+    lines = window.measurementPanel.autoLabel.text().splitlines()
+    assert lines[1].endswith("(fitted circle) · quality: low")
+    assert lines[2] == (
+        f"  width {format_cm(134.5)} · sides {format_cm(4.0, 1)} above the chin"
+        " · width quality: good"
+    )
+    warning = window.measurementPanel.autoWarningLabel.text()
+    assert f"Neck circumference quality: low — {tape}" in warning
+    assert warning.count("span only") == 1
+    window.close()
+
+
+def test_width_fallback_says_above_the_chin_for_a_negative_height(qapp):
+    window = _neutral_float_window(_ok_result(height_below_chin_mm=-3.0))
+    window._update_automatic_results()
+    text = window.measurementPanel.autoLabel.text()
+    assert f"measured {format_cm(3.0, 1)} above the chin" in text
+    assert "-0" not in text and "−0" not in text
+    assert window.measurementPanel.autoLabel.toolTip() == ""
     window.close()
 
 
@@ -146,13 +208,17 @@ def test_panel_lists_the_tape_path_quality_reasons_once(qapp):
     width_reason = "clean rows span only 3.7 mm (< 5 mm)"
     inferred = "front point inferred (no beard/chin boundary found)"
     other = "left edge: outside nearer than neck edge (collar?) by 0.8 cm"
-    sag = _sag(quality="low", quality_reasons=[width_reason, inferred], warnings=[inferred])
+    # Tape-only reasons on the sag (portrait-analyser 315e40b); the library
+    # merges them into circumference_quality_reasons.
+    sag = _sag(quality="low", quality_reasons=[inferred], warnings=[inferred])
     window = _neutral_float_window(
         _sag_result(
             sag,
             quality="low",
             quality_reasons=[width_reason],
             warnings=[width_reason, other],
+            circumference_quality="low",
+            circumference_quality_reasons=[width_reason, inferred],
         )
     )
     window._update_automatic_results()
@@ -164,7 +230,24 @@ def test_panel_lists_the_tape_path_quality_reasons_once(qapp):
     assert f"Neck: {other}" in text
     assert text.count("front point inferred") == 1
     assert text.count("clean rows span") == 1
-    assert "quality: low" in window.measurementPanel.autoLabel.text()
+    panel_text = window.measurementPanel.autoLabel.text()
+    assert "(fitted circle) · quality: low" in panel_text
+    assert "width quality: low" in panel_text
+    window.close()
+
+
+def test_older_tape_path_library_merges_width_and_tape_reasons(qapp):
+    # neck_sag without circumference_quality: width + tape reasons, deduplicated.
+    width_reason = "clean rows span only 3.7 mm (< 5 mm)"
+    sag = _sag(quality="low", quality_reasons=[width_reason, "front point inferred"])
+    result = _sag_result(sag, quality="low", quality_reasons=[width_reason])
+    del result.circumference_quality
+    del result.circumference_quality_reasons
+    window = _neutral_float_window(result)
+    window._update_automatic_results()
+    warning = window.measurementPanel.autoWarningLabel.text()
+    assert f"Neck circumference quality: low — {width_reason}; front point inferred" in warning
+    assert warning.count("clean rows span") == 1
     window.close()
 
 
@@ -312,6 +395,22 @@ def test_diagnostics_list_the_plane_and_every_model(qapp):
     assert "fitted ellipse: 31.8 cm (±7.0 %)" in text
     assert "prior ellipse (b/a 0.85–0.90): 39.1–40.2 cm" in text
     assert text.index("fitted circle: 41.4") < text.index("π·W: 42.2")
+    assert "Circle RMS: 0.8 mm" in text
+    assert "Circle span: 141.0 deg" in text
+    assert "side-width+3%: fitted circle +2.5 %, π·W +3.0 %, arc circle +5.2 %" in text
+    assert "ends-10%: fitted circle -1.2 %" in text
+    assert "fitted ellipse n/a" in text
+    assert "Accuracy: fitted circle is shape-dependent" in text
+    assert "Circumference quality: good" in text
+    window.close()
+
+
+def test_diagnostics_handle_missing_sensitivities(qapp):
+    sensitivity = dict(_sag().sensitivity, fitted_circle=None)
+    window = _neutral_float_window(_sag_result(_sag(sensitivity=sensitivity)))
+    window.neck_measurement_auto = None
+    text = window._diagnostics_text()
+    assert "fitted circle: 41.4 cm (n/a) — headline" in text
     window.close()
 
 

@@ -148,8 +148,9 @@ class MeasurementPanel(QWidget):
         history_layout.addLayout(buttons)
         layout.addWidget(history_group, stretch=1)
 
-    def set_automatic_results(self, lines, warning):
+    def set_automatic_results(self, lines, warning, tooltip=None):
         self.autoLabel.setText("\n".join(lines))
+        self.autoLabel.setToolTip(tooltip or "")
         if warning:
             self.autoWarningLabel.setText(f"⚠ {warning}")
             self.autoWarningLabel.show()

@@ -218,13 +218,20 @@ def neck_width_other_warnings(result):
     return [w for w in (getattr(result, "warnings", None) or []) if w not in reasons]
 
 
+def chin_offset_text(height_below_chin_mm):
+    """ "1,2 cm below the chin" / "0,4 cm above the chin" (the library's
+    ``height_below_chin_mm`` is signed: negative = above the chin)."""
+    side = "above" if height_below_chin_mm < 0 else "below"
+    return f"{format_cm(abs(height_below_chin_mm), 1)} {side} the chin"
+
+
 def neck_width_position_text(result, *, quality=True):
     """ "measured 1,2 cm below the chin · quality: good" (parts left out when
     unknown; ``quality=False`` leaves the quality out)."""
     parts = []
     height_mm = getattr(result, "height_below_chin_mm", None)
     if height_mm is not None:
-        parts.append(f"measured {format_cm(height_mm, 1)} below the chin")
+        parts.append(f"measured {chin_offset_text(height_mm)}")
     quality = getattr(result, "quality", None) if quality else None
     if quality is not None:
         parts.append(f"quality: {quality}")
@@ -246,6 +253,20 @@ NECK_SAG_FRONT_SOURCE_LABELS = {
     "chin-end": "below the chin",
     "inferred": "inferred (no beard/chin boundary found)",
 }
+# Accuracy of the headline model (portrait_analyser.neck_sag, "Bias of the
+# fitted circle"): panel tooltip and diagnostics.
+NECK_SAG_ACCURACY_CAVEAT = (
+    "fitted circle is shape-dependent: ~±5 % on round necks, up to +22 % on front-flat "
+    "and −17 % on deep necks (synthetic)"
+)
+# Diagnostics order of the sensitivity perturbations (others follow).
+NECK_SAG_PERTURBATION_ORDER = (
+    "side-width+3%",
+    "side-width-3%",
+    "front+5mm",
+    "front-5mm",
+    "ends-10%",
+)
 # The library's warning when the tape path failed (the fallback line says it).
 NECK_SAG_FAILED_WARNING_PREFIX = "no tape-plane circumference"
 
@@ -279,6 +300,25 @@ def neck_sag_headline(result):
     return circumference, model or sag.headline_model
 
 
+def neck_circumference_quality(result, sag):
+    """``(quality, reasons)`` of the headline circumference.
+
+    ``result.circumference_quality(_reasons)`` (width reasons + tape reasons)
+    when the library gives it; older neck_sag builds: the width's and the
+    tape path's reasons merged (duplicates dropped).
+    """
+    quality = getattr(result, "circumference_quality", None)
+    if quality is not None:
+        return quality, list(getattr(result, "circumference_quality_reasons", None) or [])
+    reasons = []
+    for reason in [*(result.quality_reasons or []), *(sag.quality_reasons or [])]:
+        if reason not in reasons:
+            reasons.append(reason)
+    if reasons:
+        return NECK_WIDTH_QUALITY_LOW, reasons
+    return sag.quality, reasons
+
+
 def neck_sag_unavailable_text(result):
     """Why an ``"ok"`` automatic width has no tape-path circumference."""
     if not hasattr(result, "sag"):
@@ -292,12 +332,13 @@ def neck_sag_unavailable_text(result):
     return _sentence(message) if message else "failed"
 
 
-def format_sensitivity(value):
-    """Sensitivity to the side-point placement (diagnostics), e.g. "±2.5 %"."""
-    if value is None:
-        return None
-    if not math.isfinite(value):
-        return "lost when the side points move"
+def format_sensitivity(value, *, signed=False):
+    """Sensitivity of a model (diagnostics), e.g. "±2.5 %" or, ``signed``,
+    "+1.2 %"; "n/a" when the perturbed model could not be computed."""
+    if value is None or not math.isfinite(value):
+        return "n/a"
+    if signed:
+        return f"{100.0 * value:+.1f} %"
     return f"±{100.0 * value:.1f} %"
 
 
@@ -3884,15 +3925,20 @@ class MainWindow(UILoaderMixin, QMainWindow):
         """``(lines, warning)``: the tape-path circumference as the headline,
         the width and a compact comparison with the other models."""
         circumference_mm, model = neck_sag_headline(result)
-        lines = [
+        quality, reasons = neck_circumference_quality(result, sag)
+        headline = (
             f"Neck circumference: {format_cm(circumference_mm, 1)} ({neck_sag_model_label(model)})"
-        ]
+        )
+        if quality is not None:
+            headline += f" · quality: {quality}"
+        lines = [headline]
+        # The width line keeps the width's own quality (result.quality).
         parts = [f"width {format_cm(result.width_mm)}"]
         height_mm = getattr(result, "height_below_chin_mm", None)
         if height_mm is not None:
-            parts.append(f"sides {format_cm(height_mm, 1)} below the chin")
-        if sag.quality is not None:
-            parts.append(f"quality: {sag.quality}")
+            parts.append(f"sides {chin_offset_text(height_mm)}")
+        if getattr(result, "quality", None) is not None:
+            parts.append(f"width quality: {result.quality}")
         lines.append("  " + " · ".join(parts))
         circumferences = sag.circumferences_mm or {}
         compare = []
@@ -3907,13 +3953,13 @@ class MainWindow(UILoaderMixin, QMainWindow):
         if compare:
             lines.append("  compare: " + " · ".join(compare))
         warnings = []
-        if sag.quality == NECK_WIDTH_QUALITY_LOW:
+        if quality == NECK_WIDTH_QUALITY_LOW:
             text = "Neck circumference quality: low"
-            if sag.quality_reasons:
-                text += " — " + "; ".join(sag.quality_reasons)
+            if reasons:
+                text += " — " + "; ".join(reasons)
             warnings.append(text)
-        # The tape path's reasons include the width's; list everything else once.
-        shown = set(sag.quality_reasons or [])
+        # The headline's reasons include the width's; list everything else once.
+        shown = set(reasons)
         for warning in [*(sag.warnings or []), *(result.warnings or [])]:
             if warning not in shown:
                 shown.add(warning)
@@ -4015,6 +4061,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 line += f", 3-point plane {sag.plane_tilt_3pt_deg:.1f} deg"
             txt += line
         for label, value, unit in (
+            ("Circle RMS", getattr(sag, "circle_rms_mm", None), "mm"),
+            ("Circle span", getattr(sag, "circle_span_deg", None), "deg"),
             ("Front drop", sag.front_drop_deg, "deg"),
             ("Width (3D, side points)", sag.width_mm, "mm"),
             ("Sagitta", sag.sagitta_mm, "mm"),
@@ -4025,24 +4073,42 @@ class MainWindow(UILoaderMixin, QMainWindow):
         ):
             if value is not None:
                 txt += f"\n  {label}: {value:.1f} {unit}"
-        txt += "\n  Models (sensitivity to the side points):"
+        txt += "\n  Models (sensitivity: largest change over the perturbations):"
         circumferences = sag.circumferences_mm or {}
         order = [m for m in NECK_SAG_MODEL_LABELS if m in circumferences]
         order += [m for m in circumferences if m not in order]
         for model in order:
             line = f"\n    {neck_sag_model_label(model)}: {circumferences[model] / 10.0:.1f} cm"
-            sensitivity = format_sensitivity((sag.sensitivity or {}).get(model))
-            if sensitivity is not None:
-                line += f" ({sensitivity})"
+            sensitivity = sag.sensitivity or {}
+            if model in sensitivity:
+                line += f" ({format_sensitivity(sensitivity[model])})"
             if model == sag.headline_model:
                 line += " — headline"
             txt += line
         prior = sag.circumference_prior_ellipse_mm
         if prior is not None:
             txt += f"\n    prior ellipse (b/a 0.85–0.90): {prior[0] / 10.0:.1f}–{prior[1] / 10.0:.1f} cm"
-        txt += f"\n  Quality: {sag.quality}"
+        detail = getattr(sag, "sensitivity_detail", None) or {}
+        if detail:
+            txt += "\n  Sensitivity per perturbation:"
+            names = [n for n in NECK_SAG_PERTURBATION_ORDER if n in detail]
+            names += [n for n in detail if n not in names]
+            for name in names:
+                changes = detail[name] or {}
+                parts = [
+                    f"{neck_sag_model_label(m)} {format_sensitivity(changes[m], signed=True)}"
+                    for m in order
+                    if m in changes
+                ]
+                txt += f"\n    {name}: " + ", ".join(parts)
+        txt += f"\n  Tape quality: {sag.quality}"
         for reason in sag.quality_reasons or []:
             txt += f"\n    - {reason}"
+        quality, reasons = neck_circumference_quality(result, sag)
+        txt += f"\n  Circumference quality: {quality}"
+        for reason in reasons:
+            txt += f"\n    - {reason}"
+        txt += f"\n  Accuracy: {NECK_SAG_ACCURACY_CAVEAT}"
         txt += f"\n  Path: {len(sag.path or [])} points"
         for warning in sag.warnings or []:
             txt += f"\n  ⚠ {warning}"
@@ -4160,7 +4226,16 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 lines.append(f"Neck width (3D front arc): {format_cm(sd.neck_width_front_arc_mm)}")
                 lines.append(f"Neck width (3D straight): {format_cm(sd.neck_width_straight_mm)}")
         lines.append(depth_line)
-        self.measurementPanel.set_automatic_results(lines, combine_warnings(warning, depth_warning))
+        tooltip = None
+        if (
+            pose == PortraitPose.NEUTRAL_NECK
+            and self._neck_width_shown()
+            and neck_sag(self.neck_width_auto) is not None
+        ):
+            tooltip = f"Neck circumference: {NECK_SAG_ACCURACY_CAVEAT}."
+        self.measurementPanel.set_automatic_results(
+            lines, combine_warnings(warning, depth_warning), tooltip
+        )
 
     def _diagnostics_text(self):
         pose = self.neck_midpoint.pose if self.neck_midpoint else None
