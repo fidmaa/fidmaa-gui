@@ -98,6 +98,13 @@ from .measurement_tools import (
     neck_history_surface_mm,
 )
 from .neck_arc import compute_neck_arc
+from .neck_snap import (
+    NECK_SNAP_WINDOW_MM,
+    SNAP_NOT_FOUND_TEXT,
+    SNAP_OK,
+    skin_array,
+    snap_neck_end,
+)
 from .region_measurement import (
     MeasurementError,
     Region,
@@ -279,6 +286,10 @@ class MainWindow(UILoaderMixin, QMainWindow):
         self._tool_history_index = None
         self._point_drag_index = None
         self._suppress_next_click = False
+        # Neck tool end snapping: {"first"/"last": (raw display point,
+        # placed display point, SnapResult)}.
+        self._neck_end_snaps = {}
+        self._neck_skin_cache = None
         self.load_ui()
         self._create_zoom_panel()
         self._create_measurement_panel()
@@ -522,6 +533,15 @@ class MainWindow(UILoaderMixin, QMainWindow):
             self.toolBar.addAction(action)
 
         tools_menu.addSeparator()
+        self.snapNeckEndsAction = tools_menu.addAction("Snap Neck ends to edges")
+        self.snapNeckEndsAction.setCheckable(True)
+        self.snapNeckEndsAction.setChecked(True)
+        self.snapNeckEndsAction.setStatusTip(
+            f"Neck tool: move the first and last point to the neck edge found in the skin "
+            f"matte on that row (within ±{NECK_SNAP_WINDOW_MM:.0f} mm of the click)"
+        )
+        self.snapNeckEndsAction.toggled.connect(self._on_snap_neck_ends_toggled)
+        tools_menu.addSeparator()
         action_details = (
             (SelectionMode.HIGHEST, Qt.Key_H, "Highest region tool"),
             (SelectionMode.LOWEST, Qt.Key_L, "Lowest region tool"),
@@ -705,7 +725,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
         MeasurementTool.REGION: "Click to place region A, then region B. Drag to move.",
         MeasurementTool.NECK: (
             "Click the left neck edge, points across the front of the neck, and the right "
-            "edge; finish with Enter or right-click. 2 points = width only."
+            "edge; finish with Enter or right-click. 2 points = width only. "
+            "The ends snap to the neck edge (Tools ▸ Snap Neck ends to edges)."
         ),
     }
 
@@ -724,6 +745,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
         )
         self._tool_history_index = None
         self._point_drag_index = None
+        self._neck_end_snaps = {}
         self.regionOptionsWidget.setVisible(tool == MeasurementTool.REGION)
         self.lineOptionsWidget.setVisible(tool in self.SURFACE_TOOLS)
         self._set_region_selection_enabled(tool == MeasurementTool.REGION)
@@ -875,10 +897,13 @@ class MainWindow(UILoaderMixin, QMainWindow):
             self._neck_tool_unavailable(hint, IMPLAUSIBLE_DEPTH_NA, IMPLAUSIBLE_DEPTH_DETAIL)
             return
         if len(points) < 2:
+            self._neck_end_snaps = {}
             self.measurementPanel.set_tool_result(
                 MeasurementTool.NECK.value, None, None, [], hint, labels=labels
             )
             return
+        self._snap_neck_ends()
+        points = self.polyline_editor.points
         measure = getattr(portrait_analyser, "neck_width_from_edges", None)
         if measure is None:
             self._neck_tool_unavailable(
@@ -994,6 +1019,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
             )
             texts = (circumference_text, width_text)
 
+        details = self._neck_snap_details() + details
         self.measurementPanel.set_tool_result(
             MeasurementTool.NECK.value,
             width_mm,
@@ -1027,6 +1053,99 @@ class MainWindow(UILoaderMixin, QMainWindow):
         if polyline is not None and polyline.segments:
             arc_mm = polyline.surface_mm
         return arc_circle(chord_mm, arc_mm)
+
+    # ---------------------------------------------------- Neck end snapping
+
+    NECK_END_NAMES = {"first": "First", "last": "Last"}
+
+    def _neck_skin(self):
+        """The skin matte as the library's float array (cached per portrait)."""
+        portrait = self.portrait
+        skinmap = getattr(portrait, "skinmap", None)
+        if skinmap is None:
+            return None
+        cached = self._neck_skin_cache
+        if cached is None or cached[0] is not portrait:
+            cached = (portrait, skin_array(skinmap, self.image.size))
+            self._neck_skin_cache = cached
+        return cached[1]
+
+    def _snap_neck_ends(self):
+        """Snap the Neck polyline's first point (once there are 2 points) and
+        last point (once finished) to the library's neck edge on its row.
+
+        A snapped end is remembered with its raw click; it is only searched
+        again when it moved (dragged) and never while it is being dragged.
+        Middle points are never snapped. Off: the raw clicks are restored.
+        """
+        editor = self.polyline_editor
+        points = editor.points
+        if not self.snapNeckEndsAction.isChecked():
+            self._neck_end_snaps = {}
+            return
+        wanted = {"first": 0}
+        if editor.finished:
+            wanted["last"] = len(points) - 1
+        for key in list(self._neck_end_snaps):
+            if key not in wanted:
+                del self._neck_end_snaps[key]
+        for key, index in wanted.items():
+            if index == self._point_drag_index:
+                continue
+            state = self._neck_end_snaps.get(key)
+            if state is not None and points[index] == state[1]:
+                continue
+            raw = points[index]
+            other = points[-1] if index == 0 else points[0]
+            try:
+                result = snap_neck_end(
+                    self.portrait,
+                    self._neck_skin(),
+                    self.display_to_photo_coordinates(*raw),
+                    self.display_to_photo_coordinates(*other),
+                )
+            except ValueError:
+                # The library rejects degenerate input (e.g. coinciding
+                # points); the click then stays where it is, with a warning.
+                logger.warning("neck edge snapping failed", exc_info=True)
+                self._neck_end_snaps[key] = (raw, raw, None)
+                continue
+            placed = raw
+            if result.status == SNAP_OK:
+                snapped_x, _ = self._photo_to_main_display(result.point)
+                placed = (float(snapped_x), raw[1])  # y stays as clicked
+                editor.move_point(index, placed)
+            self._neck_end_snaps[key] = (raw, placed, result)
+
+    def _neck_end_snapped(self, key):
+        state = self._neck_end_snaps.get(key)
+        return state is not None and state[2] is not None and state[2].status == SNAP_OK
+
+    def _neck_snap_details(self):
+        if not self.snapNeckEndsAction.isChecked() or not self._neck_end_snaps:
+            return []
+        snapped = [key for key in ("first", "last") if self._neck_end_snapped(key)]
+        lines = []
+        if snapped:
+            names = " and ".join(self.NECK_END_NAMES[key].lower() for key in snapped)
+            lines.append(f"Ends snapped to neck edges ({names})")
+        for key in ("first", "last"):
+            if key in self._neck_end_snaps and not self._neck_end_snapped(key):
+                lines.append(f"⚠ {self.NECK_END_NAMES[key]} end: {SNAP_NOT_FOUND_TEXT}")
+        return lines
+
+    def _on_snap_neck_ends_toggled(self, checked):
+        if not checked:
+            # Back to the raw clicks for ends that were moved by snapping.
+            points = self.polyline_editor.points
+            for key, (raw, placed, _result) in self._neck_end_snaps.items():
+                index = 0 if key == "first" else len(points) - 1
+                if points and points[index] == placed:
+                    self.polyline_editor.move_point(index, raw)
+            self._neck_end_snaps = {}
+        if self.current_tool == MeasurementTool.NECK:
+            self._update_tool_result()
+            self._redraw_tool_overlay()
 
     def _neck_arc_points(self, points):
         """The Neck polyline (display points) with both ends moved
@@ -1117,6 +1236,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
         x, y = self._clamped_display_point(point)
         if self.polyline_editor.add_point((x, y)):
             self._tool_history_index = None
+            self._neck_end_snaps = {}
         self.ui.xValue.setValue(int(x))
         self.ui.yValue.setValue(int(y))
         self._update_tool_result()
@@ -1154,8 +1274,12 @@ class MainWindow(UILoaderMixin, QMainWindow):
     def _finish_point_drag(self, point, *args):
         if self._point_drag_index is None:
             return
-        self._drag_point(point)
+        index = self._point_drag_index
+        self.polyline_editor.move_point(index, self._clamped_display_point(point))
+        # Released: a dragged Neck end is snapped again (not while dragging).
         self._point_drag_index = None
+        self._update_tool_result()
+        self._redraw_tool_overlay()
 
     def _redraw_tool_overlay(self):
         if self.portrait:
@@ -1199,6 +1323,7 @@ class MainWindow(UILoaderMixin, QMainWindow):
                 else:
                     self.polyline_editor.clear()
                     self._tool_history_index = None
+                    self._neck_end_snaps = {}
                 self._update_tool_result()
                 self._redraw_tool_overlay()
                 event.accept()
@@ -1613,10 +1738,22 @@ class MainWindow(UILoaderMixin, QMainWindow):
             painter.setBrush(Qt.NoBrush)
             for start, end in zip(mapped, mapped[1:], strict=False):
                 painter.drawLine(start, end)
+            snapped = set()
+            if self.current_tool == MeasurementTool.NECK:
+                if self._neck_end_snapped("first"):
+                    snapped.add(0)
+                if self._neck_end_snapped("last"):
+                    snapped.add(len(mapped) - 1)
             for number, point in enumerate(mapped, start=1):
-                painter.setPen(Qt.NoPen)
-                painter.setBrush(self.POLYLINE_COLOR)
-                painter.drawEllipse(point, 4, 4)
+                if number - 1 in snapped:
+                    # Snapped Neck end: a hollow ring on the edge.
+                    painter.setPen(QtGui.QPen(self.POLYLINE_COLOR, 2))
+                    painter.setBrush(Qt.NoBrush)
+                    painter.drawEllipse(point, 6, 6)
+                else:
+                    painter.setPen(Qt.NoPen)
+                    painter.setBrush(self.POLYLINE_COLOR)
+                    painter.drawEllipse(point, 4, 4)
                 painter.setPen(self.POLYLINE_COLOR)
                 painter.drawText(point + QPoint(6, -6), str(number))
         finally:
