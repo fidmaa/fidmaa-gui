@@ -3,6 +3,39 @@
 
 all: clean macos
 
+UNAME_S := $(shell uname -s)
+
+.PHONY: prepare-developer-machine prepare-developer-machine-linux \
+	prepare-developer-machine-macos dev-setup test run
+
+# Installs the system packages uv cannot (apt on Debian/Ubuntu, Homebrew on
+# macOS), then the Python environment and the pre-commit hooks.
+prepare-developer-machine:
+ifeq ($(UNAME_S),Darwin)
+	$(MAKE) prepare-developer-machine-macos
+else ifeq ($(UNAME_S),Linux)
+	$(MAKE) prepare-developer-machine-linux
+else
+	$(error Unsupported OS: $(UNAME_S))
+endif
+	$(MAKE) dev-setup
+
+prepare-developer-machine-linux:
+	./scripts/prepare-dev-linux.sh
+
+prepare-developer-machine-macos:
+	./scripts/prepare-dev-macos.sh
+
+dev-setup:
+	uv sync
+	uv run pre-commit install
+
+test:
+	uv run pytest
+
+run:
+	uv run fidmaa_gui
+
 clean:
 	find . -name __pycache__ -type d -print0 | xargs -0 rm -rf
 	find . -name \*~ -print0 | xargs -0 rm -f

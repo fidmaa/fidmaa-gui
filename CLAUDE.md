@@ -9,6 +9,10 @@ FIDMAA GUI is a desktop application for analyzing iPhone portrait photos (HEIC f
 ## Build & Run
 
 ```bash
+# One-time machine setup: apt (Linux) / Homebrew (macOS) packages uv cannot
+# install, then uv sync + pre-commit install
+make prepare-developer-machine
+
 # Install dependencies
 uv sync
 
@@ -38,11 +42,13 @@ uv run pytest
 - `portrait-analyser`: Loads iOS portrait photos, extracts depth/skin/teeth maps, detects faces
 - `fidmaa-simple-viewer`: Converts FIDMAA data to PyVista 3D surfaces
 - `pyvistaqt`: 3D visualization via PyVista in Qt
-- `pyheif-iplweb`: HEIC file format support
+- `pyheif-iplweb` (macOS) / `pyheif>=0.8.0` (Linux, manylinux wheel with bundled libheif): HEIC
+  support. 16-bit lossless-JPEG depth maps (original camera `.HEIC`) are beyond libheif; on
+  macOS portrait-analyser reads them via ImageIO/AVFoundation (pyobjc), on Linux they fail.
 
 ## Conventions
 
 - Formatting and linting: ruff (`ruff-check --fix` + `ruff-format`, line length 100),
-  wired up via `.pre-commit-config.yaml`. Run `pre-commit install` once.
+  wired up via `.pre-commit-config.yaml` (installed by `make dev-setup`).
 - The application works with fixed display sizes: main image 480x640, zoom views 480x320
 - Depth values are converted from 0-255 pixel range to centimeters using iPhone TrueDepth EXIF calibration data

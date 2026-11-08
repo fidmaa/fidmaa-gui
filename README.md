@@ -10,23 +10,43 @@ on facial portraits. Built with PySide6 (Qt for Python).
 
 ## Requirements
 
-- macOS (the app bundle and CI target macOS; other platforms are untested)
+- macOS or Linux (Ubuntu/Debian; tested on Ubuntu 26.04). The app bundle
+  targets macOS only.
 - Python 3.12
 - [uv](https://docs.astral.sh/uv/) for dependency management
 - An iPhone portrait photo in HEIC format, with the depth map preserved. Photos
   exported through most messaging apps have it stripped.
 
+> **Linux limitation:** original iPhone portraits (`.HEIC` straight from the
+> camera) store the depth map as 16-bit lossless JPEG. libheif's JPEG plugin
+> only has the 8-bit libjpeg path, so no libheif version decodes it. On macOS,
+> portrait-analyser falls back to Apple's ImageIO/AVFoundation (via pyobjc).
+> Linux has no such fallback yet, so these photos fail with `NoDepthMapFound`.
+> Photos whose depth is stored as 8-bit HEVC (e.g. re-exported `.heic` files)
+> open fine. The UI and the test suite work.
+
 ## Install & run
 
 ```bash
-# Install dependencies
-uv sync
+# One-time: system packages uv cannot install (apt on Linux, Homebrew on
+# macOS), then `uv sync` and the pre-commit hook
+make prepare-developer-machine
 
 # Run the application
-uv run fidmaa_gui
+uv run fidmaa_gui          # or: make run
 # Or with a file argument:
 uv run fidmaa_gui ~/path/to/photo.heic
 ```
+
+What `prepare-developer-machine` installs:
+
+- **Linux** (`scripts/prepare-dev-linux.sh`): the OpenGL/EGL, X11/xcb, Wayland
+  and font libraries that the PySide6, VTK and OpenCV wheels load at runtime,
+  plus uv if it's missing. libheif is not needed, because pyheif's wheel
+  bundles it.
+- **macOS** (`scripts/prepare-dev-macos.sh`): `libheif` and `uv` from Homebrew,
+  plus a symlink to `/opt/local/lib/libheif.1.dylib`, which is where
+  pyheif-iplweb expects to find it.
 
 ## Build a macOS app bundle
 
@@ -116,9 +136,11 @@ median-filtered straight-row surface vector at several sampling intervals.
 ## Development
 
 ```bash
-uv run pytest          # run the test suite
-pre-commit install     # enable ruff + hygiene hooks on commit
+make test              # or: uv run pytest
 ```
+
+`make prepare-developer-machine` (or `make dev-setup`) already ran
+`pre-commit install`, so ruff and the hygiene hooks run on every commit.
 
 ## License
 

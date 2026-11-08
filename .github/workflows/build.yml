@@ -42,3 +42,24 @@ jobs:
       # The .app bundle is deliberately NOT built here. It weighs ~850 MB,
       # which is far too much to store on every push. Build it locally with
       # `make all` when you actually need it.
+
+  test-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+
+      - name: Install system packages
+        # The same script developers run via `make prepare-developer-machine`,
+        # so CI catches it going stale.
+        run: ./scripts/prepare-dev-linux.sh
+
+      - name: Install deps
+        run: uv sync
+
+      - name: Run tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: uv run pytest
