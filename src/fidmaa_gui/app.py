@@ -4552,7 +4552,23 @@ INITIAL_WINDOW_WIDTH = 1500
 INITIAL_WINDOW_HEIGHT = 860
 
 
+def undo_opencv_qt_environment():
+    """Drop the Qt paths opencv-python points at its own bundled Qt.
+
+    On Linux the opencv(-contrib)-python wheels (pulled in by mediapipe and
+    portrait-analyser) ship a private Qt and, on ``import cv2``, set
+    QT_QPA_PLATFORM_PLUGIN_PATH / QT_QPA_FONTDIR to it. PySide6's Qt then
+    tries to load cv2's xcb plugin and fails ("Could not load the Qt platform
+    plugin xcb"). Only values pointing into a cv2 package are removed, so a
+    user's own setting survives.
+    """
+    for variable in ("QT_QPA_PLATFORM_PLUGIN_PATH", "QT_QPA_FONTDIR"):
+        if f"{os.sep}cv2{os.sep}" in os.environ.get(variable, ""):
+            del os.environ[variable]
+
+
 def main():
+    undo_opencv_qt_environment()
     app = QApplication(sys.argv)
     app.setApplicationName("FIDMAA GUI")
     app.setApplicationDisplayName("FIDMAA GUI")

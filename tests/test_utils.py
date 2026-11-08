@@ -152,3 +152,19 @@ class TestGetCircumferenceOfCircle:
 
     def test_zero_radius(self):
         assert get_circumference_of_circle(0) == 0
+
+
+def test_undo_opencv_qt_environment(monkeypatch):
+    import os
+
+    from fidmaa_gui.app import undo_opencv_qt_environment
+
+    cv2_dir = os.path.join(os.sep, "venv", "site-packages", "cv2", "qt")
+    monkeypatch.setenv("QT_QPA_PLATFORM_PLUGIN_PATH", os.path.join(cv2_dir, "plugins"))
+    monkeypatch.setenv("QT_QPA_FONTDIR", os.path.join(os.sep, "usr", "share", "fonts"))
+
+    undo_opencv_qt_environment()
+
+    assert "QT_QPA_PLATFORM_PLUGIN_PATH" not in os.environ
+    # Not opencv's: left alone.
+    assert os.environ["QT_QPA_FONTDIR"] == os.path.join(os.sep, "usr", "share", "fonts")
