@@ -41,6 +41,22 @@ def no_depth_data_error(exception):
     )
 
 
+def unverified_device_question(exception):
+    """Question shown before opening a photo from a model whose depth reader
+    (the one used outside macOS) was never compared with Apple's."""
+    model = html.escape(getattr(exception, "model", None) or "an unknown device")
+    software = getattr(exception, "software", None)
+    system = f" (iOS {html.escape(software)})" if software else ""
+    return (
+        f"<p>This photo was taken with <b>{model}</b>{system}.</p>"
+        "<p>On this computer its depth map is decoded without Apple's own reader. "
+        "That decoder has been checked against Apple's only for the iPhone 17 Pro; "
+        "another model may store depth differently, so distances measured on this "
+        "photo could be wrong.</p>"
+        "<p>Open the photo on a Mac to be sure. Open it here anyway?</p>"
+    )
+
+
 NO_FRONT_CAMERA_NOTIFICATION = tr(
     """<p>
 Looking at the file description, it does not look like it was taken using the front camera

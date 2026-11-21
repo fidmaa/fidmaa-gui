@@ -26,7 +26,8 @@ on facial portraits. Built with PySide6 (Qt for Python).
 > (iOS 26.3.1, front TrueDepth camera): all 97 agree (same invalid-pixel mask
 > and depth metadata, largest difference at any pixel 0.023 mm at face
 > distances of 44-83 cm). Other iPhone models and iOS versions have not been
-> checked; on Linux treat their depth as unverified.
+> checked: on Linux the app asks before opening such a photo, and distances
+> measured on it may be wrong.
 
 ## Install & run
 

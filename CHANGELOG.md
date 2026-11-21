@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Outside macOS, opening an original iPhone `.HEIC` (16-bit depth) taken
+  with a model other than the iPhone 17 Pro now asks first: the depth
+  decoder used there has only been checked against Apple's for that model.
+  A photo opened anyway carries a warning in the diagnostics text. Requires
+  portrait-analyser 0.10.2.
+
 ### Changed
 
 - Requires portrait-analyser 0.10.1: original iPhone `.HEIC` files with a

@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 from PIL import Image
 from portrait_analyser.depth_sampling import median_filter_depthmap
-from portrait_analyser.exceptions import NoDepthMapFound
+from portrait_analyser.exceptions import NoDepthMapFound, UnverifiedDepthDevice
 from portrait_analyser.pose import PortraitPose
 from PySide6 import QtGui
 from PySide6.QtCore import QPoint, QPointF, Qt
@@ -408,6 +408,61 @@ def test_failed_load_does_not_change_filename_or_reset_measurement(qapp, monkeyp
     assert window.filename == original_filename
     assert window.polyline_editor.points == original_points
     window.close()
+
+
+def _unverified_then_stub(calls):
+    def fake_load_image(fileName, use_exif=True, allow_unverified_device=False):
+        calls.append(allow_unverified_device)
+        if not allow_unverified_device:
+            raise UnverifiedDepthDevice("unverified", model="iPhone 16", software="18.0")
+        return _stub_portrait()
+
+    return fake_load_image
+
+
+def test_unverified_device_is_opened_only_after_confirmation(qapp, monkeypatch):
+    window = MainWindow()
+    calls, asked = [], []
+    monkeypatch.setattr("fidmaa_gui.app.load_image", _unverified_then_stub(calls))
+    monkeypatch.setattr(window, "_run_detection_and_update", lambda *a, **k: None)
+    monkeypatch.setattr(
+        window, "_confirm_unverified_device", lambda error: asked.append(error.model) or True
+    )
+
+    window._loadImage("/tmp/photo.heic")
+
+    assert asked == ["iPhone 16"]
+    assert calls == [False, True]
+    assert window.filename == "/tmp/photo.heic"
+    window.close()
+
+
+def test_declined_unverified_device_keeps_the_previous_photo(qapp, monkeypatch):
+    window = _window_with_flat_depth()
+    original_filename = window.filename
+    calls, errors_shown = [], []
+    monkeypatch.setattr("fidmaa_gui.app.load_image", _unverified_then_stub(calls))
+    monkeypatch.setattr(window, "_confirm_unverified_device", lambda error: False)
+    monkeypatch.setattr(window, "critical_error", errors_shown.append)
+
+    window._loadImage("/tmp/other.heic")
+
+    assert calls == [False]  # never retried with the override
+    assert window.filename == original_filename
+    assert errors_shown == []  # declining is not an error
+    window.close()
+
+
+def test_unverified_device_question_names_the_device():
+    from fidmaa_gui import errors
+
+    text = errors.unverified_device_question(
+        UnverifiedDepthDevice("x", model="iPhone <16>", software="18.0")
+    )
+
+    assert "iPhone &lt;16&gt;" in text
+    assert "iOS 18.0" in text
+    assert "iPhone 17 Pro" in text
 
 
 def test_open3d_action_disabled_until_photo_loaded(qapp, monkeypatch):

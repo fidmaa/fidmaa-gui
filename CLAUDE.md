@@ -47,7 +47,8 @@ uv run pytest
   macOS portrait-analyser reads them via ImageIO/AVFoundation (pyobjc), on Linux via `imagecodecs`
   (portrait-analyser >= 0.10.1). The two readers agree on 97/97 original portraits (largest
   difference at any pixel 0.023 mm), all from an iPhone 17 Pro on iOS 26.3.1; other models are
-  unverified on Linux.
+  unverified on Linux: `load_image` raises `UnverifiedDepthDevice` and `_load_portrait` asks the user
+  before retrying with `allow_unverified_device=True`.
 
 ## Conventions
 

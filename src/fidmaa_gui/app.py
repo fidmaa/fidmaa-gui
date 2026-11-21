@@ -18,6 +18,7 @@ from portrait_analyser.exceptions import (
     ExifValidationFailed,
     NoDepthMapFound,
     UnknownExtension,
+    UnverifiedDepthDevice,
 )
 from portrait_analyser.incisor import (
     depth_raw_to_distance_cm,
@@ -3520,13 +3521,40 @@ class MainWindow(UILoaderMixin, QMainWindow):
         line_len = math.sqrt(abs(dist_x * dist_x) + abs(dist_y * dist_y))
         return line_len
 
+    def _confirm_unverified_device(self, error):
+        """Ask whether to open a photo whose depth reader is unverified for its model."""
+        answer = QMessageBox.warning(
+            self,
+            tr("FIDMAA notification"),
+            errors.unverified_device_question(error),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return answer == QMessageBox.Yes
+
+    def _load_portrait(self, fileName):
+        """load_image(); None when the user declines an unverified device.
+
+        Outside macOS the depth of original iPhone photos is decoded by a
+        reader checked against Apple's only for some models; for any other
+        the library refuses unless told to go ahead, so ask first.
+        """
+        try:
+            return load_image(fileName, use_exif=False)
+        except UnverifiedDepthDevice as e:
+            if not self._confirm_unverified_device(e):
+                return None
+            return load_image(fileName, use_exif=False, allow_unverified_device=True)
+
     def _loadImage(self, fileName):
         # Load into locals first: on failure (ExifValidationFailed /
         # NoDepthMapFound / UnknownExtension) the previous photo stays on
         # screen, so self.filename and the in-progress measurement must be
         # left untouched rather than pointing at a photo that never loaded.
         try:
-            portrait: IOSPortrait = load_image(fileName, use_exif=False)
+            portrait: IOSPortrait = self._load_portrait(fileName)
+            if portrait is None:
+                return
             image = portrait.photo
             # Measurements read portrait.depth (float for capture-app files);
             # this 8-bit image is for display (and the legacy code path).
@@ -4246,6 +4274,8 @@ class MainWindow(UILoaderMixin, QMainWindow):
             repair = getattr(self.portrait, "depth_repaired", None)
             if repair:
                 txt += f"; repaired: {repair}"
+            if getattr(self.portrait, "depth_device_verified", None) is False:
+                txt += "\nWARNING: depth reader not verified for this iPhone model"
         if pose == PortraitPose.OPEN_MOUTH:
             if self.portrait.teeth_bbox:
                 txt += "\n\nTeeth detected."
