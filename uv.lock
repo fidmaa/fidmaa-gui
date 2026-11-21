@@ -270,7 +270,7 @@ requires-dist = [
     { name = "opencv-python", specifier = ">=4.6.0.66,<5" },
     { name = "piexif", specifier = ">=1.1.3,<2" },
     { name = "pillow", specifier = ">=10.2.0,<11" },
-    { name = "portrait-analyser", extras = ["pose"], specifier = ">=0.10.1,<0.11" },
+    { name = "portrait-analyser", extras = ["pose"], specifier = ">=0.10.2,<0.11" },
     { name = "pyheif", marker = "sys_platform == 'linux'", specifier = ">=0.8.0" },
     { name = "pyheif-iplweb", marker = "sys_platform == 'darwin'", specifier = ">=0.7.1.dev1176" },
     { name = "pyside6", specifier = ">=6.6.2,<7" },
@@ -712,7 +712,7 @@ wheels = [
 
 [[package]]
 name = "portrait-analyser"
-version = "0.10.1"
+version = "0.10.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "imagecodecs" },
@@ -727,9 +727,9 @@ dependencies = [
     { name = "pyobjc-framework-quartz", marker = "sys_platform == 'darwin'" },
     { name = "pyobjc-framework-vision", marker = "sys_platform == 'darwin'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/74/60/9f0e7622d50783c672e07e577ac9de3bb97da32f5242ed6729320a7366b9/portrait_analyser-0.10.1.tar.gz", hash = "sha256:059031bdd5888628d0c6e70c350fdeffc5f6c0ffa0b35f69a7f1104103fff79e", size = 3492977, upload-time = "2026-11-21T19:35:47.118Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b0/df/d06deb7da58ae937b2ced07b5387166fd4a019fb5f7983472c5572a76c20/portrait_analyser-0.10.2.tar.gz", hash = "sha256:5442cd97d9a4ed24d036c0ffb7b867d3563e9d1694994a425f79aa288e98b941", size = 3496042, upload-time = "2026-11-21T20:30:25.385Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ce/a7/dcf75afffc045cce7db2938332370c8dce749608758e39d722790423f910/portrait_analyser-0.10.1-py3-none-any.whl", hash = "sha256:803cddfc0df4a6959924eae9b7792c42237aebc4b1374cd521f0d48c2ec05471", size = 145877, upload-time = "2026-11-21T19:35:45.427Z" },
+    { url = "https://files.pythonhosted.org/packages/fb/82/a9151685fe34504c8ab09b161a41c9416ff2b435370b9f2d3ffa781453ad/portrait_analyser-0.10.2-py3-none-any.whl", hash = "sha256:1c2c271105a679558b2ca4f8d279d763367d36aaa5c1624cc8dc28a05ad2aab6", size = 147920, upload-time = "2026-11-21T20:30:23.786Z" },
 ]
 
 [package.optional-dependencies]
