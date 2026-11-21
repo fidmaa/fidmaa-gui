@@ -46,7 +46,8 @@ uv run pytest
   support. 16-bit lossless-JPEG depth maps (original camera `.HEIC`) are beyond libheif; on
   macOS portrait-analyser reads them via ImageIO/AVFoundation (pyobjc), on Linux via `imagecodecs`
   (portrait-analyser >= 0.10.1). The two readers agree on 97/97 original portraits (largest
-  difference at any pixel 0.023 mm).
+  difference at any pixel 0.023 mm), all from an iPhone 17 Pro on iOS 26.3.1; other models are
+  unverified on Linux.
 
 ## Conventions
 

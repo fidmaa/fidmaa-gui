@@ -22,9 +22,11 @@ on facial portraits. Built with PySide6 (Qt for Python).
 > macOS portrait-analyser reads it with Apple's ImageIO/AVFoundation (via
 > pyobjc); on Linux it reads it with `imagecodecs` (portrait-analyser 0.10.1
 > or newer), so these photos open on both systems. The two readers were
-> compared pixel by pixel on 97 original portraits: all 97 agree (same
-> invalid-pixel mask and depth metadata, largest difference at any pixel
-> 0.023 mm at face distances of 44-83 cm).
+> compared pixel by pixel on 97 original portraits, all from an iPhone 17 Pro
+> (iOS 26.3.1, front TrueDepth camera): all 97 agree (same invalid-pixel mask
+> and depth metadata, largest difference at any pixel 0.023 mm at face
+> distances of 44-83 cm). Other iPhone models and iOS versions have not been
+> checked; on Linux treat their depth as unverified.
 
 ## Install & run
 
