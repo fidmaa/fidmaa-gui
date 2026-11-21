@@ -44,7 +44,9 @@ uv run pytest
 - `pyvistaqt`: 3D visualization via PyVista in Qt
 - `pyheif-iplweb` (macOS) / `pyheif>=0.8.0` (Linux, manylinux wheel with bundled libheif): HEIC
   support. 16-bit lossless-JPEG depth maps (original camera `.HEIC`) are beyond libheif; on
-  macOS portrait-analyser reads them via ImageIO/AVFoundation (pyobjc), on Linux they fail.
+  macOS portrait-analyser reads them via ImageIO/AVFoundation (pyobjc), on Linux via `imagecodecs`
+  (portrait-analyser >= 0.10.1). The two readers agree on 97/97 original portraits (largest
+  difference at any pixel 0.023 mm).
 
 ## Conventions
 

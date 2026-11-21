@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- Requires portrait-analyser 0.10.1: original iPhone `.HEIC` files with a
+  16-bit lossless-JPEG depth map now open on Linux (previously
+  `NoDepthMapFound`). The Linux reader matches Apple's on 97/97 test
+  portraits.
+
 ## [0.1.3] - 2026-08-11
 
 ### Added

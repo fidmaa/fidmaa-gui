@@ -17,13 +17,14 @@ on facial portraits. Built with PySide6 (Qt for Python).
 - An iPhone portrait photo in HEIC format, with the depth map preserved. Photos
   exported through most messaging apps have it stripped.
 
-> **Linux limitation:** original iPhone portraits (`.HEIC` straight from the
-> camera) store the depth map as 16-bit lossless JPEG. libheif's JPEG plugin
-> only has the 8-bit libjpeg path, so no libheif version decodes it. On macOS,
-> portrait-analyser falls back to Apple's ImageIO/AVFoundation (via pyobjc).
-> Linux has no such fallback yet, so these photos fail with `NoDepthMapFound`.
-> Photos whose depth is stored as 8-bit HEVC (e.g. re-exported `.heic` files)
-> open fine. The UI and the test suite work.
+> **Original iPhone `.HEIC` files on Linux:** photos straight from the camera
+> store the depth map as 16-bit lossless JPEG, which libheif cannot decode. On
+> macOS portrait-analyser reads it with Apple's ImageIO/AVFoundation (via
+> pyobjc); on Linux it reads it with `imagecodecs` (portrait-analyser 0.10.1
+> or newer), so these photos open on both systems. The two readers were
+> compared pixel by pixel on 97 original portraits: all 97 agree (same
+> invalid-pixel mask and depth metadata, largest difference at any pixel
+> 0.023 mm at face distances of 44-83 cm).
 
 ## Install & run
 
